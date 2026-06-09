@@ -70,6 +70,7 @@ func main() {
 	log.Printf("starting %d workers", cfg.Workers)
 
 	ring := workload.NewSessionRing(cfg.RingSize)
+	collector := workload.NewStatsCollector()
 
 	var runCtx context.Context
 	var runCancel context.CancelFunc
@@ -80,13 +81,17 @@ func main() {
 	}
 	defer runCancel()
 
+	summaryInterval := time.Duration(cfg.SummaryIntervalSecs) * time.Second
+	go collector.RunSummaryLoop(runCtx, summaryInterval, pool)
+
 	var wg sync.WaitGroup
 	for i := 0; i < cfg.Workers; i++ {
 		wg.Add(1)
-		go func(id int) {
+		ws := collector.NewWorkerStats()
+		go func(id int, ws *workload.WorkerStats) {
 			defer wg.Done()
-			workload.RunWorker(runCtx, pool, ring, cfg, id)
-		}(i)
+			workload.RunWorker(runCtx, pool, ring, cfg, id, ws)
+		}(i, ws)
 	}
 
 	sigCh := make(chan os.Signal, 1)

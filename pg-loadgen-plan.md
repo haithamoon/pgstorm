@@ -605,7 +605,8 @@ pg-loadgen/
 │   ├── worker.go
 │   ├── ops.go
 │   ├── payload.go
-│   └── ring.go              ← shared session UUID ring buffer
+│   ├── ring.go              ← shared session UUID ring buffer
+│   └── stats.go             ← per-worker stats collector + 30s summary printer
 ├── metrics/
 │   ├── metrics.go
 │   └── pool_collector.go    ← custom prometheus.Collector for pool.Stat()
@@ -615,6 +616,52 @@ pg-loadgen/
     ├── deployment.yaml
     └── service.yaml
 ```
+
+---
+
+## 30-Second Summary (`workload/stats.go`)
+
+Every 30 seconds a summary is printed to stdout covering the window since the last tick.
+
+### Output format
+
+```
+━━━ 30s summary [21:10:50 | +30s elapsed] ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  total      1,842 ops   61.4 ops/s   errors: 3
+  ┌──────────────┬────────┬─────────┬────────┬────────┬────────┐
+  │ op           │  count │  ops/s  │ p50 ms │ p95 ms │ p99 ms │
+  ├──────────────┼────────┼─────────┼────────┼────────┼────────┤
+  │ insert       │    645 │   21.5  │   12.3 │   45.2 │  112.4 │
+  │ read_simple  │    368 │   12.3  │    2.1 │    8.7 │   22.3 │
+  │ read_join    │    368 │   12.3  │    5.4 │   18.2 │   44.1 │
+  │ update       │    276 │    9.2  │   15.7 │   52.3 │  134.2 │
+  │ delete       │    185 │    6.2  │    8.9 │   31.4 │   78.6 │
+  └──────────────┴────────┴─────────┴────────┴────────┴────────┘
+  pool  acquired=18  idle=2  total=20  max=25  │  workers=20
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+```
+
+### Design
+
+- **`WorkerStats`** — per-worker struct updated on the hot path (no mutex, owned by the goroutine):
+  - `counts[op]` — ops in the current window
+  - `errors[op]` — errors in the current window
+  - `latencyBuckets[op][bucket]` — fixed-bucket histogram (same 10 buckets as Prometheus)
+- **`StatsCollector`** — holds a slice of `*WorkerStats` (one per worker, registered at start).
+  - `RunSummaryLoop(ctx, interval, pool)` — goroutine that ticks every 30s, snapshots all workers' stats, resets their window counters, computes p50/p95/p99 from merged buckets, and prints the table.
+- Snapshot+reset is done by calling a `Snapshot() WorkerStats` method on each worker under a per-worker mutex (held for microseconds). No shared mutex across all workers — each worker only blocks itself for the snapshot, not the whole fleet.
+- Pool stats (`acquired`, `idle`, `total`, `max`) read from `pool.Stat()` once per tick.
+- `SUMMARY_INTERVAL_SECS` env var (default 30) controls the tick interval.
+
+### Latency percentile computation
+
+p50/p95/p99 are computed from the merged fixed-bucket histogram across all workers. Buckets mirror the Prometheus histogram: `[1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500] ms`. Percentile is the upper bound of the bucket where cumulative count crosses the target quantile.
+
+### Integration
+
+- `main.go` creates a `StatsCollector`, passes it to each `RunWorker` call.
+- Each worker calls `collector.Record(op, duration, err)` after every op — updates its own `WorkerStats`.
+- `main.go` launches `collector.RunSummaryLoop(ctx, interval, pool)` as a goroutine before starting workers.
 
 ---
 

@@ -29,8 +29,9 @@ type Config struct {
 
 	MetricsPort int
 
-	RunDurationSecs int
-	LogLevel        string
+	RunDurationSecs     int
+	SummaryIntervalSecs int
+	LogLevel            string
 }
 
 func Load() (*Config, error) {
@@ -50,8 +51,9 @@ func Load() (*Config, error) {
 		DeleteOlderThanMin: getEnvInt("DELETE_OLDER_THAN_MINS", 10),
 		ThinkTimeMs:        getEnvInt("THINK_TIME_MS", 0),
 		MetricsPort:        getEnvInt("METRICS_PORT", 9090),
-		RunDurationSecs:    getEnvInt("RUN_DURATION_SECS", 0),
-		LogLevel:           getEnv("LOG_LEVEL", "info"),
+		RunDurationSecs:     getEnvInt("RUN_DURATION_SECS", 0),
+		SummaryIntervalSecs: getEnvInt("SUMMARY_INTERVAL_SECS", 30),
+		LogLevel:            getEnv("LOG_LEVEL", "info"),
 	}
 
 	total := cfg.WritePct + cfg.ReadSimplePct + cfg.ReadJoinPct + cfg.UpdatePct + cfg.DeletePct

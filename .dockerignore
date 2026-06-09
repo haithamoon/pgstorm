@@ -1,0 +1,5 @@
+pgdata/
+.git/
+.gitignore
+pg-loadgen-plan.md
+k8s/

@@ -32,7 +32,7 @@ func SelectOp(roll int, cfg *config.Config) string {
 	return OpInsert
 }
 
-func RunWorker(ctx context.Context, pool *pgxpool.Pool, ring *SessionRing, cfg *config.Config, id int) {
+func RunWorker(ctx context.Context, pool *pgxpool.Pool, ring *SessionRing, cfg *config.Config, id int, ws *WorkerStats) {
 	rng := rand.New(rand.NewSource(time.Now().UnixNano() + int64(id)))
 	exec := NewExecutor(pool, ring, cfg, rng)
 	thinkTime := time.Duration(cfg.ThinkTimeMs) * time.Millisecond
@@ -54,6 +54,7 @@ func RunWorker(ctx context.Context, pool *pgxpool.Pool, ring *SessionRing, cfg *
 		metrics.WorkersActive.Dec()
 
 		metrics.RecordOp(op, duration, err)
+		ws.Record(op, duration, err)
 
 		if err != nil && ctx.Err() == nil {
 			log.Printf("worker %d op=%s duration=%.3fs err=%v", id, op, duration, err)
