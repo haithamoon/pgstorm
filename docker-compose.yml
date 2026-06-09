@@ -1,0 +1,45 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: loadtest
+      POSTGRES_USER: loadgen
+      POSTGRES_PASSWORD: loadgen
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U loadgen -d loadtest"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  loadgen:
+    build: .
+    deploy:
+      replicas: 1
+    environment:
+      PG_DSN: postgres://loadgen:loadgen@postgres:5432/loadtest?sslmode=disable
+      WORKERS: "2"
+      CREATE_INDEXES: "false"
+      RING_SIZE: "10000"
+      WRITE_PCT: "35"
+      READ_SIMPLE_PCT: "20"
+      READ_JOIN_PCT: "20"
+      UPDATE_PCT: "15"
+      DELETE_PCT: "10"
+      MIN_PAYLOAD_KB: "8"
+      MAX_PAYLOAD_KB: "16"
+      DELETE_BATCH_SIZE: "50"
+      DELETE_OLDER_THAN_MINS: "10"
+      THINK_TIME_MS: "0"
+      METRICS_PORT: "9090"
+      RUN_DURATION_SECS: "160"
+      LOG_LEVEL: "info"
+    ports:
+      - "9090"
+    depends_on:
+      postgres:
+        condition: service_healthy
+

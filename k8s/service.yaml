@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: pg-loadgen-metrics
+  labels:
+    app: pg-loadgen
+spec:
+  selector:
+    app: pg-loadgen
+  ports:
+    - name: metrics
+      port: 9090
+      targetPort: 9090
+  type: ClusterIP

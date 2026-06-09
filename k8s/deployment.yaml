@@ -1,0 +1,68 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pg-loadgen-config
+data:
+  WORKERS: "20"
+  CREATE_INDEXES: "false"
+  RING_SIZE: "10000"
+  WRITE_PCT: "35"
+  READ_SIMPLE_PCT: "20"
+  READ_JOIN_PCT: "20"
+  UPDATE_PCT: "15"
+  DELETE_PCT: "10"
+  MIN_PAYLOAD_KB: "8"
+  MAX_PAYLOAD_KB: "16"
+  DELETE_BATCH_SIZE: "50"
+  DELETE_OLDER_THAN_MINS: "10"
+  THINK_TIME_MS: "0"
+  METRICS_PORT: "9090"
+  RUN_DURATION_SECS: "0"
+  LOG_LEVEL: "info"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pg-loadgen
+  labels:
+    app: pg-loadgen
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: pg-loadgen
+  template:
+    metadata:
+      labels:
+        app: pg-loadgen
+    spec:
+      containers:
+        - name: pg-loadgen
+          image: your-registry/pg-loadgen:latest
+          ports:
+            - containerPort: 9090
+              name: metrics
+          envFrom:
+            - configMapRef:
+                name: pg-loadgen-config
+            - secretRef:
+                name: pg-loadgen-secret
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 9090
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 9090
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "256Mi"
+            limits:
+              cpu: "2"
+              memory: "512Mi"

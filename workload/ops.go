@@ -1,0 +1,272 @@
+package workload
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"math/rand"
+
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"pg-loadgen/config"
+)
+
+const (
+	OpInsert     = "insert"
+	OpReadSimple = "read_simple"
+	OpReadJoin   = "read_join"
+	OpUpdate     = "update"
+	OpDelete     = "delete"
+)
+
+var regions = []string{"us-east-1", "us-west-2", "eu-west-1", "ap-southeast-1", "ap-northeast-1"}
+var severities = []string{"info", "warn", "error", "debug"}
+var eventTypes = []string{"request", "response", "error", "auth", "payment", "audit", "system"}
+
+type Executor struct {
+	pool *pgxpool.Pool
+	ring *SessionRing
+	cfg  *config.Config
+	rng  *rand.Rand
+}
+
+func NewExecutor(pool *pgxpool.Pool, ring *SessionRing, cfg *config.Config, rng *rand.Rand) *Executor {
+	return &Executor{pool: pool, ring: ring, cfg: cfg, rng: rng}
+}
+
+func (e *Executor) Execute(ctx context.Context, op string) error {
+	switch op {
+	case OpInsert:
+		return e.doInsert(ctx)
+	case OpReadSimple:
+		return e.doReadSimple(ctx)
+	case OpReadJoin:
+		return e.doReadJoin(ctx)
+	case OpUpdate:
+		return e.doUpdate(ctx)
+	case OpDelete:
+		return e.doDelete(ctx)
+	default:
+		return fmt.Errorf("unknown op: %s", op)
+	}
+}
+
+func (e *Executor) doInsert(ctx context.Context) error {
+	sessionID := uuid.New()
+	userID := uuid.New()
+	region := regions[e.rng.Intn(len(regions))]
+	metadata := GetMutatedPayload(e.rng, e.cfg.MinPayloadKB, e.cfg.MaxPayloadKB)
+	numEvents := 1 + e.rng.Intn(3)
+
+	tx, err := e.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx) //nolint
+
+	_, err = tx.Exec(ctx,
+		`INSERT INTO sessions (id, user_id, started_at, region, metadata, status)
+		 VALUES ($1, $2, now(), $3, $4, 'active')`,
+		sessionID, userID, region, metadata,
+	)
+	if err != nil {
+		return fmt.Errorf("insert session: %w", err)
+	}
+
+	for i := 0; i < numEvents; i++ {
+		eventID := uuid.New()
+		payload := GetMutatedPayload(e.rng, e.cfg.MinPayloadKB, e.cfg.MaxPayloadKB)
+		traceID := fmt.Sprintf("%016x", e.rng.Int63())
+		severity := severities[e.rng.Intn(len(severities))]
+		evType := eventTypes[e.rng.Intn(len(eventTypes))]
+
+		_, err = tx.Exec(ctx,
+			`INSERT INTO events (id, session_id, event_type, occurred_at, payload, severity, trace_id)
+			 VALUES ($1, $2, $3, now(), $4, $5, $6)`,
+			eventID, sessionID, evType, payload, severity, traceID,
+		)
+		if err != nil {
+			return fmt.Errorf("insert event: %w", err)
+		}
+	}
+
+	auditID := uuid.New()
+	changedBy := uuid.New()
+	diff := buildAuditDiff(e.rng)
+	checksum := fmt.Sprintf("%016x", e.rng.Int63())
+
+	_, err = tx.Exec(ctx,
+		`INSERT INTO audit_log (id, entity_type, entity_id, action, changed_by, diff, checksum)
+		 VALUES ($1, 'session', $2, 'INSERT', $3, $4, $5)`,
+		auditID, sessionID, changedBy, diff, checksum,
+	)
+	if err != nil {
+		return fmt.Errorf("insert audit: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("commit insert: %w", err)
+	}
+
+	e.ring.Push(sessionID)
+	return nil
+}
+
+func (e *Executor) doReadSimple(ctx context.Context) error {
+	sessionID, ok := e.ring.Sample(e.rng)
+	if !ok {
+		return nil
+	}
+
+	rows, err := e.pool.Query(ctx,
+		`SELECT id, event_type, occurred_at, severity, trace_id
+		 FROM events
+		 WHERE session_id = $1
+		 ORDER BY occurred_at DESC
+		 LIMIT 20`,
+		sessionID,
+	)
+	if err != nil {
+		return fmt.Errorf("read simple: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var id uuid.UUID
+		var eventType, severity, traceID string
+		var occurredAt interface{}
+		_ = rows.Scan(&id, &eventType, &occurredAt, &severity, &traceID)
+	}
+	return rows.Err()
+}
+
+func (e *Executor) doReadJoin(ctx context.Context) error {
+	sessionID, ok := e.ring.Sample(e.rng)
+	if !ok {
+		return nil
+	}
+
+	severity := severities[e.rng.Intn(len(severities))]
+
+	rows, err := e.pool.Query(ctx,
+		`SELECT
+			s.id, s.user_id, s.region, s.status,
+			e.id as event_id, e.event_type, e.severity, e.payload,
+			al.action, al.changed_at
+		 FROM sessions s
+		 JOIN events e ON e.session_id = s.id
+		 LEFT JOIN audit_log al ON al.entity_id = s.id
+		 WHERE s.id = $1
+		   AND e.severity = $2
+		 ORDER BY e.occurred_at DESC
+		 LIMIT 20`,
+		sessionID, severity,
+	)
+	if err != nil {
+		return fmt.Errorf("read join: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var sID, userID uuid.UUID
+		var region, status, eventID, eventType, sev string
+		var payload []byte
+		var action *string
+		var changedAt interface{}
+		_ = rows.Scan(&sID, &userID, &region, &status, &eventID, &eventType, &sev, &payload, &action, &changedAt)
+	}
+	return rows.Err()
+}
+
+func (e *Executor) doUpdate(ctx context.Context) error {
+	sessionID, ok := e.ring.Sample(e.rng)
+	if !ok {
+		return nil
+	}
+
+	metadata := GetMutatedPayload(e.rng, e.cfg.MinPayloadKB, e.cfg.MaxPayloadKB)
+
+	tx, err := e.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx) //nolint
+
+	var lockedID uuid.UUID
+	err = tx.QueryRow(ctx,
+		`SELECT id FROM sessions WHERE id = $1 FOR UPDATE SKIP LOCKED`,
+		sessionID,
+	).Scan(&lockedID)
+	if err == pgx.ErrNoRows {
+		return tx.Rollback(ctx)
+	}
+	if err != nil {
+		return fmt.Errorf("lock session: %w", err)
+	}
+
+	_, err = tx.Exec(ctx,
+		`UPDATE sessions
+		 SET status = 'closed', ended_at = now(), metadata = $2
+		 WHERE id = $1`,
+		sessionID, metadata,
+	)
+	if err != nil {
+		return fmt.Errorf("update session: %w", err)
+	}
+
+	auditID := uuid.New()
+	changedBy := uuid.New()
+	diff := buildAuditDiff(e.rng)
+	checksum := fmt.Sprintf("%016x", e.rng.Int63())
+
+	_, err = tx.Exec(ctx,
+		`INSERT INTO audit_log (id, entity_type, entity_id, action, changed_by, diff, checksum)
+		 VALUES ($1, 'session', $2, 'UPDATE', $3, $4, $5)`,
+		auditID, sessionID, changedBy, diff, checksum,
+	)
+	if err != nil {
+		return fmt.Errorf("update audit: %w", err)
+	}
+
+	return tx.Commit(ctx)
+}
+
+func (e *Executor) doDelete(ctx context.Context) error {
+	sessionID, ok := e.ring.Sample(e.rng)
+	if !ok {
+		return nil
+	}
+
+	_, err := e.pool.Exec(ctx,
+		`DELETE FROM events
+		 WHERE id IN (
+			 SELECT id FROM events
+			 WHERE session_id = $1
+			 ORDER BY occurred_at ASC
+			 LIMIT $2
+		 )`,
+		sessionID, e.cfg.DeleteBatchSize,
+	)
+	if err != nil {
+		return fmt.Errorf("delete events: %w", err)
+	}
+	return nil
+}
+
+func buildAuditDiff(rng *rand.Rand) []byte {
+	diff := map[string]interface{}{
+		"before": map[string]interface{}{
+			"status":   "active",
+			"metadata": randomString(rng, 50, 100),
+		},
+		"after": map[string]interface{}{
+			"status":   "closed",
+			"metadata": randomString(rng, 50, 100),
+		},
+		"changed_fields": []string{"status", "metadata", "ended_at"},
+		"context":        randomString(rng, 100, 200),
+	}
+	data, _ := json.Marshal(diff)
+	return data
+}
