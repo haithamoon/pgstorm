@@ -94,6 +94,7 @@ func CreateIndexes(ctx context.Context, pool *pgxpool.Pool) error {
 		CREATE INDEX IF NOT EXISTS idx_events_session_id          ON events (session_id);
 		CREATE INDEX IF NOT EXISTS idx_events_occurred_at         ON events (occurred_at DESC);
 		CREATE INDEX IF NOT EXISTS idx_events_severity_occurred   ON events (severity, occurred_at DESC);
+		CREATE INDEX IF NOT EXISTS idx_events_source_ip           ON events (source_ip);
 
 		CREATE INDEX IF NOT EXISTS idx_audit_log_entity_id  ON audit_log (entity_id, changed_at DESC);
 		CREATE INDEX IF NOT EXISTS idx_audit_log_changed_at ON audit_log (changed_at DESC);
