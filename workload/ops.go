@@ -23,9 +23,17 @@ const (
 
 var regions = []string{"us-east-1", "us-west-2", "eu-west-1", "ap-southeast-1", "ap-northeast-1"}
 
-var sourceIPs = []string{
-	"10.0.1.1", "10.0.1.2", "10.0.2.100", "172.16.0.50", "172.16.1.200",
-	"192.168.0.10", "192.168.1.42", "203.0.113.5", "198.51.100.22", "203.0.113.99",
+// randomIP generates a random address from the three private ranges:
+// 10.0.0.0/8 (~16M addresses), 172.16.0.0/12 (~1M), 192.168.0.0/16 (~65K).
+func randomIP(rng *rand.Rand) string {
+	switch rng.Intn(3) {
+	case 0:
+		return fmt.Sprintf("10.%d.%d.%d", rng.Intn(256), rng.Intn(256), rng.Intn(256))
+	case 1:
+		return fmt.Sprintf("172.%d.%d.%d", 16+rng.Intn(16), rng.Intn(256), rng.Intn(256))
+	default:
+		return fmt.Sprintf("192.168.%d.%d", rng.Intn(256), rng.Intn(256))
+	}
 }
 var severities = []string{"info", "warn", "error", "debug"}
 var eventTypes = []string{"request", "response", "error", "auth", "payment", "audit", "system"}
@@ -86,7 +94,7 @@ func (e *Executor) doInsert(ctx context.Context) error {
 		traceID := fmt.Sprintf("%016x", e.rng.Int63())
 		severity := severities[e.rng.Intn(len(severities))]
 		evType := eventTypes[e.rng.Intn(len(eventTypes))]
-		sourceIP := sourceIPs[e.rng.Intn(len(sourceIPs))]
+		sourceIP := randomIP(e.rng)
 
 		_, err = tx.Exec(ctx,
 			`INSERT INTO events (id, session_id, event_type, occurred_at, payload, severity, trace_id, source_ip)
