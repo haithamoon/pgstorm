@@ -10,41 +10,50 @@ import (
 
 const templatePoolSize = 100
 
+// Two template pools: one for sessions (4–8 KB) and one for events (8–16 KB).
 var (
-	templatePool    [templatePoolSize][]byte
-	traceIDOffsets  [templatePoolSize]int
+	sessionTemplatePool    [templatePoolSize][]byte
+	sessionTraceIDOffsets  [templatePoolSize]int
+	eventTemplatePool      [templatePoolSize][]byte
+	eventTraceIDOffsets    [templatePoolSize]int
 )
 
 func init() {
 	for i := 0; i < templatePoolSize; i++ {
-		data, offset := buildTemplate(rand.New(rand.NewSource(int64(i))))
-		templatePool[i] = data
-		traceIDOffsets[i] = offset
+		rng := rand.New(rand.NewSource(int64(i)))
+		sessionTemplatePool[i], sessionTraceIDOffsets[i] = buildTemplate(rng, 4, 8)
+		eventTemplatePool[i], eventTraceIDOffsets[i] = buildTemplate(rng, 8, 16)
 	}
 }
 
+// GetMutatedPayload returns a copy of a template with a mutated trace_id.
+// minKB/maxKB select which pool to draw from: 4–8 → session pool, 8–16 → event pool.
 func GetMutatedPayload(rng *rand.Rand, minKB, maxKB int) []byte {
+	var pool *[templatePoolSize][]byte
+	var offsets *[templatePoolSize]int
+	if minKB <= 4 {
+		pool = &sessionTemplatePool
+		offsets = &sessionTraceIDOffsets
+	} else {
+		pool = &eventTemplatePool
+		offsets = &eventTraceIDOffsets
+	}
+
 	idx := rng.Intn(templatePoolSize)
-	tmpl := templatePool[idx]
+	buf := make([]byte, len(pool[idx]))
+	copy(buf, pool[idx])
 
-	buf := make([]byte, len(tmpl))
-	copy(buf, tmpl)
-
-	offset := traceIDOffsets[idx]
+	offset := offsets[idx]
 	if offset >= 0 && offset+16 <= len(buf) {
-		// Write 16 valid hex characters — keeps JSON valid and busts Toast dedup
 		const hexChars = "0123456789abcdef"
 		for i := offset; i < offset+16; i++ {
 			buf[i] = hexChars[rng.Intn(16)]
 		}
 	}
-
-	_ = minKB
-	_ = maxKB
 	return buf
 }
 
-func buildTemplate(rng *rand.Rand) ([]byte, int) {
+func buildTemplate(rng *rand.Rand, minKB, maxKB int) ([]byte, int) {
 	payload := map[string]interface{}{
 		"request":     buildRequest(rng),
 		"response":    buildResponse(rng),
@@ -57,8 +66,7 @@ func buildTemplate(rng *rand.Rand) ([]byte, int) {
 
 	data, _ := json.Marshal(payload)
 
-	// Pad to target size (8–16 KB range)
-	targetSize := (8 + rng.Intn(9)) * 1024
+	targetSize := (minKB + rng.Intn(maxKB-minKB+1)) * 1024
 	if padLen := targetSize - len(data) - 20; padLen > 0 {
 		payload["_pad"] = strings.Repeat("x", padLen)
 		data, _ = json.Marshal(payload)

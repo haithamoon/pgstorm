@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/rand"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -56,7 +57,7 @@ func (e *Executor) doInsert(ctx context.Context) error {
 	sessionID := uuid.New()
 	userID := uuid.New()
 	region := regions[e.rng.Intn(len(regions))]
-	metadata := GetMutatedPayload(e.rng, e.cfg.MinPayloadKB, e.cfg.MaxPayloadKB)
+	metadata := GetMutatedPayload(e.rng, 4, 8)
 	numEvents := 1 + e.rng.Intn(3)
 
 	tx, err := e.pool.Begin(ctx)
@@ -185,7 +186,7 @@ func (e *Executor) doUpdate(ctx context.Context) error {
 		return nil
 	}
 
-	metadata := GetMutatedPayload(e.rng, e.cfg.MinPayloadKB, e.cfg.MaxPayloadKB)
+	metadata := GetMutatedPayload(e.rng, 4, 8)
 
 	tx, err := e.pool.Begin(ctx)
 	if err != nil {
@@ -268,5 +269,12 @@ func buildAuditDiff(rng *rand.Rand) []byte {
 		"context":        randomString(rng, 100, 200),
 	}
 	data, _ := json.Marshal(diff)
+
+	// Pad to 2–4 KB to stress Toast storage on audit_log, matching schema design.
+	targetSize := (2 + rng.Intn(3)) * 1024
+	if padLen := targetSize - len(data) - 12; padLen > 0 {
+		diff["_pad"] = strings.Repeat("x", padLen)
+		data, _ = json.Marshal(diff)
+	}
 	return data
 }
