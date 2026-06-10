@@ -27,6 +27,8 @@ func main() {
 		log.Fatalf("load config: %v", err)
 	}
 
+	workload.InitEventPool(cfg.MinPayloadKB, cfg.MaxPayloadKB)
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 

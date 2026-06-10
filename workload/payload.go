@@ -2,10 +2,10 @@ package workload
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"math/rand"
-	"strings"
 )
 
 const templatePoolSize = 100
@@ -22,7 +22,15 @@ func init() {
 	for i := 0; i < templatePoolSize; i++ {
 		rng := rand.New(rand.NewSource(int64(i)))
 		sessionTemplatePool[i], sessionTraceIDOffsets[i] = buildTemplate(rng, 4, 8)
-		eventTemplatePool[i], eventTraceIDOffsets[i] = buildTemplate(rng, 8, 16)
+	}
+}
+
+// InitEventPool builds the event template pool using the configured payload size range.
+// Must be called from main after config is loaded, before any workers start.
+func InitEventPool(minKB, maxKB int) {
+	for i := 0; i < templatePoolSize; i++ {
+		rng := rand.New(rand.NewSource(int64(i + templatePoolSize)))
+		eventTemplatePool[i], eventTraceIDOffsets[i] = buildTemplate(rng, minKB, maxKB)
 	}
 }
 
@@ -54,9 +62,27 @@ func GetMutatedPayload(rng *rand.Rand, minKB, maxKB int) []byte {
 }
 
 func buildTemplate(rng *rand.Rand, minKB, maxKB int) ([]byte, int) {
+	targetKB := minKB + rng.Intn(maxKB-minKB+1)
+
+	// Fixed fields (headers, stack_trace, tags, metrics, context) contribute ~4 KB.
+	// Remaining budget goes to request/response bodies (base64 of random bytes —
+	// high entropy, compresses poorly, looks like a real encoded API payload).
+	bodyBudgetKB := targetKB - 4
+	if bodyBudgetKB < 1 {
+		bodyBudgetKB = 1
+	}
+	reqBodyKB := bodyBudgetKB * 3 / 5
+	if reqBodyKB < 1 {
+		reqBodyKB = 1
+	}
+	respBodyKB := bodyBudgetKB - reqBodyKB
+	if respBodyKB < 1 {
+		respBodyKB = 1
+	}
+
 	payload := map[string]interface{}{
-		"request":     buildRequest(rng),
-		"response":    buildResponse(rng),
+		"request":     buildRequest(rng, reqBodyKB),
+		"response":    buildResponse(rng, respBodyKB),
 		"stack_trace": buildStackTrace(rng),
 		"tags":        buildTags(rng),
 		"metrics":     buildMetrics(rng),
@@ -65,13 +91,6 @@ func buildTemplate(rng *rand.Rand, minKB, maxKB int) ([]byte, int) {
 	}
 
 	data, _ := json.Marshal(payload)
-
-	targetSize := (minKB + rng.Intn(maxKB-minKB+1)) * 1024
-	if padLen := targetSize - len(data) - 20; padLen > 0 {
-		payload["_pad"] = strings.Repeat("x", padLen)
-		data, _ = json.Marshal(payload)
-	}
-
 	offset := findTraceIDOffset(data)
 	return data, offset
 }
@@ -85,7 +104,7 @@ func findTraceIDOffset(data []byte) int {
 	return idx + len(marker)
 }
 
-func buildRequest(rng *rand.Rand) map[string]interface{} {
+func buildRequest(rng *rand.Rand, bodyKB int) map[string]interface{} {
 	methods := []string{"GET", "POST", "PUT", "DELETE", "PATCH"}
 	paths := []string{"/api/v2/users", "/api/v2/sessions", "/api/v2/events", "/api/v2/reports", "/api/v2/metrics"}
 	headers := map[string]string{}
@@ -96,11 +115,11 @@ func buildRequest(rng *rand.Rand) map[string]interface{} {
 		"method":  methods[rng.Intn(len(methods))],
 		"path":    paths[rng.Intn(len(paths))],
 		"headers": headers,
-		"body":    randomString(rng, 1000, 2000),
+		"body":    randomBase64(rng, bodyKB*1024*3/4),
 	}
 }
 
-func buildResponse(rng *rand.Rand) map[string]interface{} {
+func buildResponse(rng *rand.Rand, bodyKB int) map[string]interface{} {
 	statuses := []int{200, 201, 400, 404, 500}
 	headers := map[string]string{}
 	for i := 0; i < 15; i++ {
@@ -109,8 +128,19 @@ func buildResponse(rng *rand.Rand) map[string]interface{} {
 	return map[string]interface{}{
 		"status":  statuses[rng.Intn(len(statuses))],
 		"headers": headers,
-		"body":    randomString(rng, 1000, 2000),
+		"body":    randomBase64(rng, bodyKB*1024*3/4),
 	}
+}
+
+// randomBase64 encodes n random bytes as a base64 string.
+// Random bytes have near-maximum entropy so they compress poorly — intentional,
+// to prevent Postgres from deflating the Toast value and reducing I/O stress.
+func randomBase64(rng *rand.Rand, n int) string {
+	b := make([]byte, n)
+	for i := range b {
+		b[i] = byte(rng.Intn(256))
+	}
+	return base64.StdEncoding.EncodeToString(b)
 }
 
 func buildStackTrace(rng *rand.Rand) []string {
