@@ -106,6 +106,23 @@ Each pod exposes metrics at `http://<pod>:9090/metrics`.
 | `pgloadgen_pool_idle_conns` | Gauge | — |
 | `pgloadgen_pool_total_conns` | Gauge | — |
 | `pgloadgen_pool_max_conns` | Gauge | — |
+| `pgloadgen_table_size_bytes` | Gauge | `table` |
+| `pgloadgen_table_live_tuples` | Gauge | `table` |
+| `pgloadgen_table_dead_tuples` | Gauge | `table` |
+| `pgloadgen_index_size_bytes` | Gauge | `index`, `table` | _(only when `CREATE_INDEXES=true`)_ |
+| `pgloadgen_index_scans_total` | Counter | `index`, `table` | _(only when `CREATE_INDEXES=true`)_ |
+
+**Useful PromQL:**
+```promql
+# Dead tuple ratio — autovacuum pressure proxy
+pgloadgen_table_dead_tuples / (pgloadgen_table_live_tuples + pgloadgen_table_dead_tuples)
+
+# Index vs table size ratio — B-tree write amplification
+pgloadgen_index_size_bytes / on(table) group_left pgloadgen_table_size_bytes
+
+# Index scan rate
+rate(pgloadgen_index_scans_total[1m])
+```
 
 Health endpoints: `GET /healthz` (liveness), `GET /readyz` (readiness).
 

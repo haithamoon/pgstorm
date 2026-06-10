@@ -42,6 +42,10 @@ func main() {
 
 	metrics.Register()
 	prometheus.MustRegister(metrics.NewPoolCollector(pool))
+	metrics.RegisterTableStats()
+	if cfg.CreateIndexes {
+		metrics.RegisterIndexStats()
+	}
 
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.Handler())
@@ -83,6 +87,12 @@ func main() {
 
 	summaryInterval := time.Duration(cfg.SummaryIntervalSecs) * time.Second
 	go collector.RunSummaryLoop(runCtx, summaryInterval, pool)
+
+	indexStatsInterval := time.Duration(cfg.IndexStatsIntervalSecs) * time.Second
+	go metrics.RunTableStatsLoop(runCtx, pool, indexStatsInterval)
+	if cfg.CreateIndexes {
+		go metrics.RunIndexStatsLoop(runCtx, pool, indexStatsInterval)
+	}
 
 	var wg sync.WaitGroup
 	for i := 0; i < cfg.Workers; i++ {

@@ -498,6 +498,33 @@ Registered once at startup: `prometheus.MustRegister(NewPoolCollector(pool))`
 | `pgloadgen_pool_total_conns` | Gauge (Collector) | — |
 | `pgloadgen_pool_max_conns` | Gauge (Collector) | — |
 
+### Index Bloat Tracking (`metrics/index_stats.go`)
+
+A background goroutine polls `pg_stat_user_indexes` and `pg_stat_user_tables` every `INDEX_STATS_INTERVAL_SECS` (default 30s) and updates Prometheus gauges. Gives direct feedback on B-tree write amplification when `CREATE_INDEXES=true`.
+
+**Why a background goroutine, not a custom Collector?**
+The catalog queries touch multiple system tables and can take a few milliseconds — running them synchronously on every Prometheus scrape adds latency to the scrape itself. A polling goroutine decouples collection from scraping.
+
+**Metrics added:**
+
+| Metric | Type | Labels | Source |
+|---|---|---|---|
+| `pgloadgen_index_size_bytes` | Gauge | `index`, `table` | `pg_relation_size(indexrelid)` — only when `CREATE_INDEXES=true` |
+| `pgloadgen_index_scans_total` | Counter | `index`, `table` | delta-tracked against `pg_stat_user_indexes.idx_scan`; supports `rate()` in PromQL — only when `CREATE_INDEXES=true` |
+| `pgloadgen_table_size_bytes` | Gauge | `table` | `pg_relation_size(relid)` — always |
+| `pgloadgen_table_live_tuples` | Gauge | `table` | `pg_stat_user_tables.n_live_tup` — always |
+| `pgloadgen_table_dead_tuples` | Gauge | `table` | `pg_stat_user_tables.n_dead_tup` — always |
+
+**What to watch:**
+- `pgloadgen_index_size_bytes` growing faster than `pgloadgen_table_size_bytes` → B-tree write amplification
+- `pgloadgen_table_dead_tuples` rising → MVCC churn from UPDATE/DELETE ops; triggers autovacuum pressure
+- Dead tuple ratio in PromQL: `pgloadgen_table_dead_tuples / (pgloadgen_table_live_tuples + pgloadgen_table_dead_tuples)`
+- Compare runs with `CREATE_INDEXES=false` vs `true` to quantify the cost of maintaining indexes under load
+
+**Config:** `INDEX_STATS_INTERVAL_SECS=30` (env var, default 30). Table stats poll always runs. Index stats poll only starts when `CREATE_INDEXES=true`.
+
+**Goroutine lifecycle:** Both loops select on the run context derived from the main shutdown signal — they stop as part of graceful drain, same as workers.
+
 ### Health
 - `GET /healthz` → 200 OK (for k8s liveness probe)
 - `GET /readyz` → 200 OK once pool is connected (for k8s readiness probe)
@@ -609,7 +636,8 @@ pg-loadgen/
 │   └── stats.go             ← per-worker stats collector + 30s summary printer
 ├── metrics/
 │   ├── metrics.go
-│   └── pool_collector.go    ← custom prometheus.Collector for pool.Stat()
+│   ├── pool_collector.go    ← custom prometheus.Collector for pool.Stat()
+│   └── index_stats.go       ← background goroutine polling pg_stat_user_indexes
 ├── Dockerfile
 ├── docker-compose.yml
 └── k8s/
