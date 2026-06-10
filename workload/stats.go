@@ -15,7 +15,7 @@ var bucketBounds = []float64{1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500}
 
 const numBuckets = 10
 
-var allOps = []string{OpInsert, OpReadSimple, OpReadJoin, OpUpdate, OpDelete}
+var allOps = []string{OpInsert, OpReadSimple, OpReadJoin, OpUpdate, OpDelete, OpReadByIP}
 
 type opStats struct {
 	count   int64

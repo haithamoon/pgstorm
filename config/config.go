@@ -18,6 +18,7 @@ type Config struct {
 	ReadJoinPct   int
 	UpdatePct     int
 	DeletePct     int
+	ReadIPPct     int
 
 	MinPayloadKB int
 	MaxPayloadKB int
@@ -42,10 +43,11 @@ func Load() (*Config, error) {
 		CreateIndexes:      getEnvBool("CREATE_INDEXES", false),
 		RingSize:           getEnvInt("RING_SIZE", 10000),
 		WritePct:           getEnvInt("WRITE_PCT", 35),
-		ReadSimplePct:      getEnvInt("READ_SIMPLE_PCT", 20),
+		ReadSimplePct:      getEnvInt("READ_SIMPLE_PCT", 15),
 		ReadJoinPct:        getEnvInt("READ_JOIN_PCT", 20),
 		UpdatePct:          getEnvInt("UPDATE_PCT", 15),
 		DeletePct:          getEnvInt("DELETE_PCT", 10),
+		ReadIPPct:          getEnvInt("READ_IP_PCT", 5),
 		MinPayloadKB:       getEnvInt("MIN_PAYLOAD_KB", 8),
 		MaxPayloadKB:       getEnvInt("MAX_PAYLOAD_KB", 16),
 		DeleteBatchSize:    getEnvInt("DELETE_BATCH_SIZE", 50),
@@ -58,7 +60,7 @@ func Load() (*Config, error) {
 		LogLevel:               getEnv("LOG_LEVEL", "info"),
 	}
 
-	total := cfg.WritePct + cfg.ReadSimplePct + cfg.ReadJoinPct + cfg.UpdatePct + cfg.DeletePct
+	total := cfg.WritePct + cfg.ReadSimplePct + cfg.ReadJoinPct + cfg.UpdatePct + cfg.DeletePct + cfg.ReadIPPct
 	if total != 100 {
 		return nil, fmt.Errorf("operation percentages must sum to 100, got %d", total)
 	}

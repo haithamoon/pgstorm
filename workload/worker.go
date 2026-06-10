@@ -22,6 +22,7 @@ func SelectOp(roll int, cfg *config.Config) string {
 		{OpReadJoin, cfg.ReadJoinPct},
 		{OpUpdate, cfg.UpdatePct},
 		{OpDelete, cfg.DeletePct},
+		{OpReadByIP, cfg.ReadIPPct},
 	}
 	for _, o := range ops {
 		cumulative += o.pct

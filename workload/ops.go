@@ -19,21 +19,13 @@ const (
 	OpReadJoin   = "read_join"
 	OpUpdate     = "update"
 	OpDelete     = "delete"
+	OpReadByIP   = "read_by_ip"
 )
 
 var regions = []string{"us-east-1", "us-west-2", "eu-west-1", "ap-southeast-1", "ap-northeast-1"}
 
-// randomIP generates a random address from the three private ranges:
-// 10.0.0.0/8 (~16M addresses), 172.16.0.0/12 (~1M), 192.168.0.0/16 (~65K).
 func randomIP(rng *rand.Rand) string {
-	switch rng.Intn(3) {
-	case 0:
-		return fmt.Sprintf("10.%d.%d.%d", rng.Intn(256), rng.Intn(256), rng.Intn(256))
-	case 1:
-		return fmt.Sprintf("172.%d.%d.%d", 16+rng.Intn(16), rng.Intn(256), rng.Intn(256))
-	default:
-		return fmt.Sprintf("192.168.%d.%d", rng.Intn(256), rng.Intn(256))
-	}
+	return fmt.Sprintf("192.168.%d.%d", rng.Intn(256), rng.Intn(256))
 }
 var severities = []string{"info", "warn", "error", "debug"}
 var eventTypes = []string{"request", "response", "error", "auth", "payment", "audit", "system"}
@@ -61,6 +53,8 @@ func (e *Executor) Execute(ctx context.Context, op string) error {
 		return e.doUpdate(ctx)
 	case OpDelete:
 		return e.doDelete(ctx)
+	case OpReadByIP:
+		return e.doReadByIP(ctx)
 	default:
 		return fmt.Errorf("unknown op: %s", op)
 	}
@@ -267,6 +261,31 @@ func (e *Executor) doDelete(ctx context.Context) error {
 		return fmt.Errorf("delete events: %w", err)
 	}
 	return nil
+}
+
+func (e *Executor) doReadByIP(ctx context.Context) error {
+	// Pick a random /24 within 192.168.0.0/16 and return recent events from it.
+	subnet := fmt.Sprintf("192.168.%d.0/24", e.rng.Intn(256))
+	rows, err := e.pool.Query(ctx,
+		`SELECT id, session_id, event_type, occurred_at, severity, trace_id
+		 FROM events
+		 WHERE source_ip <<= $1
+		 ORDER BY occurred_at DESC
+		 LIMIT 50`,
+		subnet,
+	)
+	if err != nil {
+		return fmt.Errorf("read by ip: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var id, sessionID uuid.UUID
+		var eventType, severity, traceID string
+		var occurredAt interface{}
+		_ = rows.Scan(&id, &sessionID, &eventType, &occurredAt, &severity, &traceID)
+	}
+	return rows.Err()
 }
 
 func buildAuditDiff(rng *rand.Rand) []byte {
