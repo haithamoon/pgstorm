@@ -41,10 +41,31 @@ var (
 		Name:      "table_dead_tuples",
 		Help:      "Estimated dead tuples per table — proxy for MVCC bloat (pg_stat_user_tables.n_dead_tup).",
 	}, []string{"table"})
+
+	tableModSinceAnalyze = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "table_mod_since_analyze",
+		Help:      "Rows modified since the last analyze; high value means stale statistics.",
+	}, []string{"table"})
+
+	tableAutovacuumTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "table_autovacuum_total",
+		Help:      "Autovacuum runs observed since pod start (delta-tracked against pg_stat_user_tables.autovacuum_count).",
+	}, []string{"table"})
+
+	tableAutoanalyzeTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "table_autoanalyze_total",
+		Help:      "Autoanalyze runs observed since pod start (delta-tracked against pg_stat_user_tables.autoanalyze_count).",
+	}, []string{"table"})
 )
 
 func RegisterTableStats() {
-	prometheus.MustRegister(tableSizeBytes, tableLiveTuples, tableDeadTuples)
+	prometheus.MustRegister(
+		tableSizeBytes, tableLiveTuples, tableDeadTuples,
+		tableModSinceAnalyze, tableAutovacuumTotal, tableAutoanalyzeTotal,
+	)
 }
 
 func RegisterIndexStats() {
@@ -54,6 +75,7 @@ func RegisterIndexStats() {
 // RunTableStatsLoop always runs — polls pg_stat_user_tables for MVCC metrics
 // regardless of whether indexes are enabled. Cancels when ctx is done.
 func RunTableStatsLoop(ctx context.Context, pool *pgxpool.Pool, interval time.Duration) {
+	tracker := newIndexScanTracker() // reuse same delta-tracker type for autovacuum/autoanalyze counts
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -61,7 +83,7 @@ func RunTableStatsLoop(ctx context.Context, pool *pgxpool.Pool, interval time.Du
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := collectTableStats(ctx, pool); err != nil && ctx.Err() == nil {
+			if err := collectTableStats(ctx, pool, tracker); err != nil && ctx.Err() == nil {
 				log.Printf("table stats collection error: %v", err)
 			}
 		}
@@ -110,13 +132,16 @@ func RunIndexStatsLoop(ctx context.Context, pool *pgxpool.Pool, interval time.Du
 	}
 }
 
-func collectTableStats(ctx context.Context, pool *pgxpool.Pool) error {
+func collectTableStats(ctx context.Context, pool *pgxpool.Pool, tracker *indexScanTracker) error {
 	rows, err := pool.Query(ctx, `
 		SELECT
 			relname,
 			pg_relation_size(relid),
 			n_live_tup,
-			n_dead_tup
+			n_dead_tup,
+			n_mod_since_analyze,
+			autovacuum_count,
+			autoanalyze_count
 		FROM pg_stat_user_tables
 		WHERE schemaname = 'public'
 		  AND relname IN ('sessions', 'events', 'audit_log')
@@ -128,13 +153,20 @@ func collectTableStats(ctx context.Context, pool *pgxpool.Pool) error {
 
 	for rows.Next() {
 		var tableName string
-		var sizeBytes, liveTup, deadTup int64
-		if err := rows.Scan(&tableName, &sizeBytes, &liveTup, &deadTup); err != nil {
+		var sizeBytes, liveTup, deadTup, modSinceAnalyze, autovacuumCount, autoanalyzeCount int64
+		if err := rows.Scan(&tableName, &sizeBytes, &liveTup, &deadTup, &modSinceAnalyze, &autovacuumCount, &autoanalyzeCount); err != nil {
 			return err
 		}
 		tableSizeBytes.WithLabelValues(tableName).Set(float64(sizeBytes))
 		tableLiveTuples.WithLabelValues(tableName).Set(float64(liveTup))
 		tableDeadTuples.WithLabelValues(tableName).Set(float64(deadTup))
+		tableModSinceAnalyze.WithLabelValues(tableName).Set(float64(modSinceAnalyze))
+		if d := tracker.delta(tableName+":autovacuum", autovacuumCount); d > 0 {
+			tableAutovacuumTotal.WithLabelValues(tableName).Add(float64(d))
+		}
+		if d := tracker.delta(tableName+":autoanalyze", autoanalyzeCount); d > 0 {
+			tableAutoanalyzeTotal.WithLabelValues(tableName).Add(float64(d))
+		}
 	}
 	return rows.Err()
 }

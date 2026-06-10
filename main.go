@@ -43,6 +43,7 @@ func main() {
 	metrics.Register()
 	prometheus.MustRegister(metrics.NewPoolCollector(pool))
 	metrics.RegisterTableStats()
+	metrics.RegisterPGStats()
 	if cfg.CreateIndexes {
 		metrics.RegisterIndexStats()
 	}
@@ -90,6 +91,7 @@ func main() {
 
 	indexStatsInterval := time.Duration(cfg.IndexStatsIntervalSecs) * time.Second
 	go metrics.RunTableStatsLoop(runCtx, pool, indexStatsInterval)
+	go metrics.RunPGStatsLoop(runCtx, pool, indexStatsInterval)
 	if cfg.CreateIndexes {
 		go metrics.RunIndexStatsLoop(runCtx, pool, indexStatsInterval)
 	}
