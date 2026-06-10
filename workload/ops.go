@@ -22,6 +22,11 @@ const (
 )
 
 var regions = []string{"us-east-1", "us-west-2", "eu-west-1", "ap-southeast-1", "ap-northeast-1"}
+
+var sourceIPs = []string{
+	"10.0.1.1", "10.0.1.2", "10.0.2.100", "172.16.0.50", "172.16.1.200",
+	"192.168.0.10", "192.168.1.42", "203.0.113.5", "198.51.100.22", "203.0.113.99",
+}
 var severities = []string{"info", "warn", "error", "debug"}
 var eventTypes = []string{"request", "response", "error", "auth", "payment", "audit", "system"}
 
@@ -81,11 +86,12 @@ func (e *Executor) doInsert(ctx context.Context) error {
 		traceID := fmt.Sprintf("%016x", e.rng.Int63())
 		severity := severities[e.rng.Intn(len(severities))]
 		evType := eventTypes[e.rng.Intn(len(eventTypes))]
+		sourceIP := sourceIPs[e.rng.Intn(len(sourceIPs))]
 
 		_, err = tx.Exec(ctx,
-			`INSERT INTO events (id, session_id, event_type, occurred_at, payload, severity, trace_id)
-			 VALUES ($1, $2, $3, now(), $4, $5, $6)`,
-			eventID, sessionID, evType, payload, severity, traceID,
+			`INSERT INTO events (id, session_id, event_type, occurred_at, payload, severity, trace_id, source_ip)
+			 VALUES ($1, $2, $3, now(), $4, $5, $6, $7)`,
+			eventID, sessionID, evType, payload, severity, traceID, sourceIP,
 		)
 		if err != nil {
 			return fmt.Errorf("insert event: %w", err)

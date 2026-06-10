@@ -36,6 +36,8 @@ services:
       THINK_TIME_MS: "0"
       METRICS_PORT: "9090"
       RUN_DURATION_SECS: "160"
+      SUMMARY_INTERVAL_SECS: "30"
+      INDEX_STATS_INTERVAL_SECS: "30"
       LOG_LEVEL: "info"
     ports:
       - "9090"
