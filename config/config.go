@@ -23,8 +23,7 @@ type Config struct {
 	MinPayloadKB int
 	MaxPayloadKB int
 
-	DeleteBatchSize    int
-	DeleteOlderThanMin int
+	DeleteBatchSize int
 
 	ThinkTimeMs int
 
@@ -50,8 +49,7 @@ func Load() (*Config, error) {
 		ReadIPPct:          getEnvInt("READ_IP_PCT", 5),
 		MinPayloadKB:       getEnvInt("MIN_PAYLOAD_KB", 8),
 		MaxPayloadKB:       getEnvInt("MAX_PAYLOAD_KB", 16),
-		DeleteBatchSize:    getEnvInt("DELETE_BATCH_SIZE", 50),
-		DeleteOlderThanMin: getEnvInt("DELETE_OLDER_THAN_MINS", 10),
+		DeleteBatchSize: getEnvInt("DELETE_BATCH_SIZE", 50),
 		ThinkTimeMs:        getEnvInt("THINK_TIME_MS", 0),
 		MetricsPort:        getEnvInt("METRICS_PORT", 9090),
 		RunDurationSecs:        getEnvInt("RUN_DURATION_SECS", 0),

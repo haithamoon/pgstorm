@@ -33,7 +33,6 @@ services:
       MIN_PAYLOAD_KB: "8"
       MAX_PAYLOAD_KB: "16"
       DELETE_BATCH_SIZE: "50"
-      DELETE_OLDER_THAN_MINS: "10"
       THINK_TIME_MS: "0"
       METRICS_PORT: "9090"
       RUN_DURATION_SECS: "160"

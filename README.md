@@ -194,8 +194,7 @@ All configuration is via environment variables.
 
 | Variable | Default | Description |
 |---|---|---|
-| `HOST_METRICS_PORT` | `9090` | Host port Docker binds to; change this if 9090 is already in use on your machine |
-| `METRICS_PORT` | `9090` | Port the Go process listens on inside the container; rarely needs changing |
+| `METRICS_PORT` | `9090` | Port the Go process listens on for `/metrics`, `/healthz`, `/readyz` |
 | `SUMMARY_INTERVAL_SECS` | `30` | How often to print the per-op summary to stdout |
 | `INDEX_STATS_INTERVAL_SECS` | `30` | How often to poll Postgres for table and index stats |
 | `LOG_LEVEL` | `info` | Log verbosity |
