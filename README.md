@@ -208,6 +208,7 @@ All configuration is via environment variables.
 | `CREATE_INDEXES` | `false` | Create B-tree indexes on startup (safe to enable on existing data) |
 | `RING_SIZE` | `10000` | Capacity of the shared session UUID ring buffer |
 | `DELETE_BATCH_SIZE` | `50` | Maximum events deleted per DELETE operation |
+| `SCHEMA_POLL_MS` | `500` | How often follower replicas poll for schema readiness (ms) |
 
 ### Observability
 
@@ -216,6 +217,7 @@ All configuration is via environment variables.
 | `METRICS_PORT` | `9090` | Port the Go process listens on for `/metrics`, `/healthz`, `/readyz` |
 | `SUMMARY_INTERVAL_SECS` | `30` | How often to print the per-op summary to stdout |
 | `INDEX_STATS_INTERVAL_SECS` | `30` | How often to poll Postgres for table and index stats |
+| `SHUTDOWN_TIMEOUT_SECS` | `5` | Grace period for the HTTP server to drain on shutdown |
 | `LOG_LEVEL` | `info` | Log verbosity |
 
 ---

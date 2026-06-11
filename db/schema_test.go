@@ -49,7 +49,7 @@ func TestMigrateWithLock_createsTables(t *testing.T) {
 	dropTables(t, pool)
 	t.Cleanup(func() { dropTables(t, pool) })
 
-	cfg := &config.Config{CreateIndexes: false}
+	cfg := &config.Config{CreateIndexes: false, SchemaPollMs: 500}
 	if err := db.MigrateWithLock(context.Background(), pool, cfg); err != nil {
 		t.Fatalf("MigrateWithLock: %v", err)
 	}
@@ -75,7 +75,7 @@ func TestMigrateWithLock_idempotent(t *testing.T) {
 	dropTables(t, pool)
 	t.Cleanup(func() { dropTables(t, pool) })
 
-	cfg := &config.Config{CreateIndexes: false}
+	cfg := &config.Config{CreateIndexes: false, SchemaPollMs: 500}
 	if err := db.MigrateWithLock(context.Background(), pool, cfg); err != nil {
 		t.Fatalf("first migration: %v", err)
 	}
@@ -100,7 +100,7 @@ func TestWaitForSchema_blocks(t *testing.T) {
 
 	ready := make(chan error, 1)
 	go func() {
-		ready <- db.WaitForSchema(ctx, pool, false)
+		ready <- db.WaitForSchema(ctx, pool, false, 500*time.Millisecond)
 	}()
 
 	// Give goroutine A a head start before creating the tables.
@@ -137,7 +137,7 @@ func TestMigrateWithLock_concurrent(t *testing.T) {
 	dropTables(t, pool)
 	t.Cleanup(func() { dropTables(t, pool) })
 
-	cfg := &config.Config{CreateIndexes: false}
+	cfg := &config.Config{CreateIndexes: false, SchemaPollMs: 500}
 	ctx := context.Background()
 
 	var wg sync.WaitGroup

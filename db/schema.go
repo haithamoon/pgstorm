@@ -39,7 +39,8 @@ func MigrateWithLock(ctx context.Context, pool *pgxpool.Pool, cfg *config.Config
 		log.Println("schema setup complete — releasing lock")
 	} else {
 		log.Println("migration lock held by another pod — waiting for schema")
-		if err := WaitForSchema(ctx, pool, cfg.CreateIndexes); err != nil {
+		pollInterval := time.Duration(cfg.SchemaPollMs) * time.Millisecond
+		if err := WaitForSchema(ctx, pool, cfg.CreateIndexes, pollInterval); err != nil {
 			return fmt.Errorf("wait for schema: %w", err)
 		}
 		log.Println("schema ready — proceeding")
@@ -107,13 +108,13 @@ func CreateIndexes(ctx context.Context, pool *pgxpool.Pool) error {
 // still holds ShareLock on the tables (which would block DML).
 const sentinelIndex = "idx_audit_log_changed_at"
 
-func WaitForSchema(ctx context.Context, pool *pgxpool.Pool, waitIndexes bool) error {
+func WaitForSchema(ctx context.Context, pool *pgxpool.Pool, waitIndexes bool, pollInterval time.Duration) error {
 	required := []string{"sessions", "events", "audit_log"}
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(500 * time.Millisecond):
+		case <-time.After(pollInterval):
 			missing := checkMissingTables(ctx, pool, required)
 			if len(missing) > 0 {
 				log.Printf("waiting for tables: %v", missing)
