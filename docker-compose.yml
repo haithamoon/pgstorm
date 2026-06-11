@@ -41,7 +41,7 @@ services:
       INDEX_STATS_INTERVAL_SECS: "30"
       LOG_LEVEL: "info"
     ports:
-      - "9090"
+      - "${HOST_METRICS_PORT:-9090}:9090"
     depends_on:
       postgres:
         condition: service_healthy
