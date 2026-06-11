@@ -13,6 +13,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/joho/godotenv"
 	"pg-loadgen/config"
 	"pg-loadgen/db"
 	"pg-loadgen/metrics"
@@ -22,6 +23,11 @@ import (
 var ready = false
 
 func main() {
+	// Load .env if present; existing env vars take priority over .env values.
+	if err := godotenv.Load(); err == nil {
+		log.Println("loaded .env file")
+	}
+
 	cfg, err := config.Load()
 	if err != nil {
 		log.Fatalf("load config: %v", err)
