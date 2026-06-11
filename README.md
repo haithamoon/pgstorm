@@ -55,6 +55,25 @@ go build ./...
 PG_DSN="postgres://user:pass@localhost:5432/mydb?sslmode=disable" WORKERS=5 ./pgstorm
 ```
 
+To run the unit tests (no database required):
+
+```bash
+go test ./...
+```
+
+With the race detector:
+
+```bash
+go test -race ./...
+```
+
+The integration tests in `db/` require a live Postgres and opt in via a build tag:
+
+```bash
+PG_DSN="postgres://user:pass@localhost:5432/mydb?sslmode=disable" \
+  go test -tags integration ./db/...
+```
+
 ---
 
 ## How It Works
