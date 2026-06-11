@@ -264,15 +264,25 @@ func (e *Executor) doDelete(ctx context.Context) error {
 }
 
 func (e *Executor) doReadByIP(ctx context.Context) error {
-	// Pick a random /24 within 192.168.0.0/16 and return recent events from it.
-	subnet := fmt.Sprintf("192.168.%d.0/24", e.rng.Intn(256))
+	sessionID, ok := e.ring.Sample(e.rng)
+	if !ok {
+		return nil
+	}
+
+	// Derive a stable /24 from the session's first UUID byte (0–255 → third octet).
+	// Same session always maps to the same subnet, so results are consistent and
+	// the query is a plain range scan that a B-tree index on source_ip can satisfy.
+	octet := int(sessionID[0])
+	lo := fmt.Sprintf("192.168.%d.0", octet)
+	hi := fmt.Sprintf("192.168.%d.255", octet)
+
 	rows, err := e.pool.Query(ctx,
 		`SELECT id, session_id, event_type, occurred_at, severity, trace_id
 		 FROM events
-		 WHERE source_ip <<= $1
+		 WHERE source_ip >= $1 AND source_ip <= $2
 		 ORDER BY occurred_at DESC
 		 LIMIT 50`,
-		subnet,
+		lo, hi,
 	)
 	if err != nil {
 		return fmt.Errorf("read by ip: %w", err)
@@ -280,10 +290,10 @@ func (e *Executor) doReadByIP(ctx context.Context) error {
 	defer rows.Close()
 
 	for rows.Next() {
-		var id, sessionID uuid.UUID
+		var id, sid uuid.UUID
 		var eventType, severity, traceID string
 		var occurredAt interface{}
-		_ = rows.Scan(&id, &sessionID, &eventType, &occurredAt, &severity, &traceID)
+		_ = rows.Scan(&id, &sid, &eventType, &occurredAt, &severity, &traceID)
 	}
 	return rows.Err()
 }
