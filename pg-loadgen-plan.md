@@ -1,9 +1,12 @@
-# Postgres Load Generator — Claude Code Master Plan
+# pgstorm — Master Plan
 
 ## Project Goal
 
 Build a Go application that generates heavy, realistic mixed-workload load against a PostgreSQL database.
 Deployable on Kubernetes with horizontal scaling via replica count. Each pod exposes a Prometheus `/metrics` endpoint.
+
+**Repo:** https://github.com/haithamoon/pgstorm
+**Supported Postgres versions:** 14, 15, 16, 17
 
 ---
 
@@ -11,18 +14,25 @@ Deployable on Kubernetes with horizontal scaling via replica count. Each pod exp
 
 | # | File | Description |
 |---|---|---|
-| 1 | `main.go` | Entry point, config loading, signal handling |
+| 1 | `main.go` | Entry point, config loading, signal handling, godotenv |
 | 2 | `config/config.go` | Env-var based config struct |
 | 3 | `db/schema.go` | Schema creation (DDL) + migration logic |
 | 4 | `db/pool.go` | pgxpool setup and tuning |
 | 5 | `workload/worker.go` | Worker goroutine: op selection loop |
-| 6 | `workload/ops.go` | All DB operations (insert, read, update, delete, join-read) |
-| 7 | `workload/payload.go` | Big-row payload generator (JSON blobs) |
-| 8 | `metrics/metrics.go` | Prometheus metrics definitions and HTTP server |
-| 9 | `docker-compose.yml` | Compose file: Postgres + load generator (N replicas) |
-| 10 | `Dockerfile` | Multi-stage Go build |
-| 11 | `k8s/deployment.yaml` | K8s Deployment + ConfigMap (no Helm) |
-| 12 | `k8s/service.yaml` | ClusterIP Service for Prometheus scraping |
+| 6 | `workload/ops.go` | All 6 DB operations (insert, read_simple, read_join, update, delete, read_by_ip) |
+| 7 | `workload/payload.go` | Big-row payload generator; base64 bodies, InitEventPool() |
+| 8 | `workload/ring.go` | Shared circular buffer of recently inserted session UUIDs |
+| 9 | `workload/stats.go` | Per-worker stats; 30s rolling summary printer |
+| 10 | `metrics/metrics.go` | Prometheus metrics definitions and HTTP server |
+| 11 | `metrics/pool_collector.go` | Custom Collector for pgxpool stats |
+| 12 | `metrics/index_stats.go` | Background loop: table + index stats from pg_stat_user_* |
+| 13 | `metrics/pg_stats.go` | Background loop: bgwriter + WAL stats; PG17-aware |
+| 14 | `docker-compose.yml` | Compose file: Postgres + load generator; HOST_METRICS_PORT |
+| 15 | `Dockerfile` | Multi-stage Go build |
+| 16 | `k8s/deployment.yaml` | K8s Deployment + ConfigMap (no Helm) |
+| 17 | `k8s/service.yaml` | ClusterIP Service for Prometheus scraping |
+| 18 | `README.md` | Full user-facing docs |
+| 19 | `.env.sample` | Template for local .env usage |
 
 ---
 
@@ -64,7 +74,7 @@ CREATE TABLE IF NOT EXISTS events (
     payload       JSONB NOT NULL,   -- ~8–16 KB JSON blob (fat row, NOT indexed)
     severity      TEXT NOT NULL DEFAULT 'info',
     trace_id      TEXT NOT NULL,
-    source_ip     INET,
+    source_ip     INET,             -- random from 192.168.0.0/16
     created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -72,6 +82,7 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS idx_events_session_id          ON events (session_id);
 CREATE INDEX IF NOT EXISTS idx_events_occurred_at         ON events (occurred_at DESC);
 CREATE INDEX IF NOT EXISTS idx_events_severity_occurred   ON events (severity, occurred_at DESC);
+CREATE INDEX IF NOT EXISTS idx_events_source_ip           ON events (source_ip);  -- B-tree; used by read_by_ip range scan
 ```
 
 #### `audit_log`
@@ -115,15 +126,16 @@ CREATE INDEX IF NOT EXISTS idx_audit_log_changed_at ON audit_log (changed_at DES
 
 ## Operation Mix (Configurable)
 
-| Operation | Default % | What it does |
-|---|---|---|
-| INSERT | 35% | Insert 1 session + 1–3 events + 1 audit row (transaction) |
-| READ (simple) | 20% | SELECT latest N events for a random session |
-| READ (join) | 20% | JOIN sessions + events + audit_log filtered by status/severity |
-| UPDATE | 15% | UPDATE session status or event severity; insert audit row |
-| DELETE | 10% | DELETE a batch of old events by `occurred_at` range (heavy scan) |
+| Operation | Env var | Default % | What it does |
+|---|---|---|---|
+| `insert` | `WRITE_PCT` | 35% | INSERT 1 session + 1–3 events + 1 audit row (transaction) |
+| `read_simple` | `READ_SIMPLE_PCT` | 15% | SELECT latest 20 events for a ring-sampled session |
+| `read_join` | `READ_JOIN_PCT` | 20% | 3-table JOIN across sessions, events, audit_log filtered by severity |
+| `update` | `UPDATE_PCT` | 15% | `SELECT FOR UPDATE SKIP LOCKED` → rewrite metadata JSONB → audit row |
+| `delete` | `DELETE_PCT` | 10% | DELETE batch of oldest events for a ring-sampled session |
+| `read_by_ip` | `READ_IP_PCT` | 5% | B-tree range scan on `events.source_ip` within deterministic /24 subnet |
 
-All percentages controlled via env vars and must sum to 100.
+All six percentages controlled via env vars and **must sum to exactly 100**. The process exits at startup if they do not.
 
 ---
 
@@ -205,43 +217,46 @@ The ring is the **only shared mutable state** between workers besides the metric
 
 ```
 # Database
-PG_DSN=postgres://user:pass@host:5432/dbname?sslmode=disable
+PG_DSN=postgres://loadgen:loadgen@localhost:5432/loadtest?sslmode=disable
 
 # Schema
-CREATE_INDEXES=false        # false (default): PKs only, raw throughput baseline
-                            # true: create B-tree indexes on all WHERE/JOIN columns
+CREATE_INDEXES=false        # false: PKs only; true: create 8 B-tree indexes on all WHERE/JOIN columns
 
 # Workload
 WORKERS=20                  # goroutines per pod
 RING_SIZE=10000             # shared session UUID ring buffer capacity
 WRITE_PCT=35
-READ_SIMPLE_PCT=20
+READ_SIMPLE_PCT=15
 READ_JOIN_PCT=20
 UPDATE_PCT=15
 DELETE_PCT=10
+READ_IP_PCT=5               # must sum to 100 with all other *_PCT vars
 
 # Payload sizing
-MIN_PAYLOAD_KB=8            # min size of events.payload JSONB
+MIN_PAYLOAD_KB=8            # min size of events.payload JSONB (passed to InitEventPool)
 MAX_PAYLOAD_KB=16           # max size of events.payload JSONB
 
 # Delete batch
 DELETE_BATCH_SIZE=50        # rows deleted per DELETE op
-DELETE_OLDER_THAN_MINS=10   # delete events older than N minutes
 
 # Think time
 THINK_TIME_MS=0             # 0 = full throttle; >0 = simulate paced load
 
-# Metrics
-METRICS_PORT=9090
+# Observability
+METRICS_PORT=9090           # container port; use HOST_METRICS_PORT in docker-compose for host mapping
+SUMMARY_INTERVAL_SECS=30
+INDEX_STATS_INTERVAL_SECS=30
 
 # Runtime
 RUN_DURATION_SECS=0         # 0 = run forever
 LOG_LEVEL=info
 ```
 
+> **Note:** The tool reads `.env` at startup via `godotenv.Load()` (non-overwriting) so declared env vars always take precedence. `HOST_METRICS_PORT` is a Docker Compose variable only — not consumed by the Go binary.
+
 ### `CREATE_INDEXES` Behaviour in Code
 
-`db/schema.go` must implement this as two separate DDL functions:
+`db/schema.go` implements this as two separate DDL functions:
 
 ```go
 func CreateTables(ctx context.Context, pool *pgxpool.Pool) error {
@@ -349,74 +364,60 @@ func WaitForSchema(ctx context.Context, pool *pgxpool.Pool) error {
 |---|---|
 | Lock is **session-scoped** | If the owner pod crashes mid-migration, Postgres releases the lock automatically when the connection closes — no manual cleanup needed |
 | Lock ID is **application-defined** | `7654321` is just a convention; hardcode it in `db/schema.go` as a constant |
-| Followers **never block** | `pg_try_advisory_lock` is non-blocking; followers poll `pg_tables` with 500ms sleep — zero contention |
+| Followers **never block** | `pg_try_advisory_lock` is non-blocking; followers poll with 500ms sleep — zero contention |
 | Idempotent DDL | `CREATE TABLE IF NOT EXISTS` + `CREATE INDEX IF NOT EXISTS` — safe to re-run across restarts |
-| `CREATE INDEX` timing | If `CREATE_INDEXES=true`, index creation happens inside the lock window, blocking followers until done — correct behaviour |
+| `CREATE INDEX` timing | If `CREATE_INDEXES=true`, `WaitForSchema` also polls `pg_indexes` for a sentinel index (`idx_audit_log_changed_at`) before releasing followers. Without this, followers would see all 3 tables, pass the check, and start workers while `CREATE INDEX` still holds `ShareLock` — causing DML to queue. |
 
 ---
 
 ## Payload Generator (`workload/payload.go`)
 
-Generate realistic-looking large JSON blobs, not random bytes. This ensures:
+Generate realistic-looking large JSON blobs using high-entropy content. This ensures:
 - JSONB parsing overhead hits Postgres
 - Toast storage is stressed (rows exceeding ~2 KB are stored out-of-line)
-- Heap I/O is the bottleneck, not index maintenance
+- pglz cannot compress the payloads — every large value exercises real Toast I/O
 
-### `events.payload` structure (~8–16 KB)
+### `events.payload` structure (`MIN_PAYLOAD_KB`–`MAX_PAYLOAD_KB`, default 8–16 KB)
 ```json
 {
   "request": {
     "method": "POST",
     "path": "/api/v2/...",
-    "headers": { ... },        // 20–30 headers
-    "body": "<base64 ~4KB>"   // simulated request body
+    "headers": { ... },
+    "body": "<base64-encoded random bytes ~40% of budget>"
   },
   "response": {
     "status": 200,
     "headers": { ... },
-    "body": "<base64 ~4KB>"
+    "body": "<base64-encoded random bytes ~60% of budget>"
   },
-  "stack_trace": [ ... ],      // 20–40 frames
-  "tags": [ ... ],             // 50–100 string tags
-  "metrics": { ... },          // 30–50 numeric k/v pairs
-  "context": { ... }           // nested object, 3 levels deep
+  "stack_trace": [ ... ],
+  "tags": [ ... ],
+  "metrics": { ... },
+  "context": { ... }
 }
 ```
+
+**Why base64 random bytes?** `encoding/base64` of random bytes produces valid JSON strings that pglz cannot deflate. Every Toast chunk is unique — no compression shortcuts, no buffer pool reuse of identical chunks.
+
+### Two Template Pools
+
+There are **two** separate pools of 100 pre-rendered templates:
+
+| Pool | Env var | Size |
+|---|---|---|
+| `sessionTemplatePool` | — | 4–8 KB (fixed) |
+| `eventTemplatePool` | `MIN_PAYLOAD_KB` / `MAX_PAYLOAD_KB` | configurable |
+
+`InitEventPool(minKB, maxKB)` is called from `main.go` after config load, so `MIN_PAYLOAD_KB` / `MAX_PAYLOAD_KB` actually control event payload sizes.
 
 ### Pre-render Pool + Micro-Mutation Engine
 
-Pre-generate a pool of **100 template payloads** at startup. At selection time, apply a **micro-mutation** before every use — do not hand the raw template to Postgres.
+Pre-generate template pools at startup. At selection time, apply a **micro-mutation** before every use — do not hand a raw template to Postgres.
 
-**Why mutation is required:**
-- Without it, Postgres may cache identical Toast chunks in shared buffers — 100 templates × 10 pods means only 100 unique Toast pages in the buffer pool, reducing actual I/O pressure
-- Identical JSONB bytes compress to the same representation — the load test becomes less realistic as the buffer pool warms up
+**Micro-mutation:** mutate the 16-char hex `trace_id` field value in-place on every call. The byte offset of `trace_id` inside each template is pre-computed at init time.
 
-**Micro-mutation implementation:**
-
-```go
-// workload/payload.go
-
-var templatePool [100][]byte   // pre-rendered at init()
-
-func GetMutatedPayload(rng *rand.Rand) []byte {
-    // 1. Pick a template
-    tmpl := templatePool[rng.Intn(100)]
-
-    // 2. Copy it (never mutate the template in-place)
-    buf := make([]byte, len(tmpl))
-    copy(buf, tmpl)
-
-    // 3. Inject 8 random bytes at a stable offset inside the "trace_id" field value
-    //    The offset is pre-computed at template build time and stored alongside each template
-    rng.Read(buf[traceIDOffset : traceIDOffset+8])
-
-    return buf
-}
-```
-
-**Cost:** one `make` + one `copy` + one `rand.Read(8 bytes)` per op. Negligible CPU overhead. Every row written to Postgres has a unique byte sequence — Toast deduplication is busted, buffer pool pressure is realistic.
-
-The `traceIDOffset` for each template is computed once at startup by scanning for the byte position of `"trace_id":"` in the rendered JSON — stored as `[100]int` alongside `templatePool`.
+**Cost:** one `make` + one `copy` + 8 random bytes per op. Every row written to Postgres has a unique byte sequence — Toast deduplication is busted, buffer pool pressure is realistic.
 
 ---
 
@@ -436,6 +437,46 @@ for each worker goroutine:
 ```
 
 Each worker gets its own context derived from a root context cancelled on SIGTERM.
+
+---
+
+## Graceful Shutdown
+
+### Context hierarchy
+
+`main()` creates two nested contexts:
+
+```
+ctx        (WithCancel — root; cancelled on SIGTERM/SIGINT or when runCtx expires)
+└── runCtx (WithCancel or WithTimeout — passed to workers and all background goroutines)
+```
+
+`cancel()` (for `ctx`) and `runCancel()` (for `runCtx`) are both registered as `defer` calls. Signal handling cancels `ctx` explicitly, which propagates to `runCtx` immediately since it is derived from `ctx`.
+
+### Shutdown sequence
+
+```
+1. SIGTERM / SIGINT arrives (or RUN_DURATION_SECS elapses)
+2. cancel() called explicitly — ctx cancelled → runCtx cancelled
+3. Every worker's in-flight pool.Query(runCtx, ...) returns with a context error
+4. Each worker checks ctx.Err() != nil, suppresses the log entry, and returns
+5. defer wg.Done() fires → wg counter decrements
+6. wg.Wait() unblocks once all workers have returned
+7. srv.Shutdown() drains the HTTP server (5 s timeout)
+8. main() returns — deferred calls execute in LIFO order:
+     shutCancel()   (HTTP shutdown context)
+     runCancel()    (no-op; already cancelled)
+     pool.Close()   (safe — see below)
+     cancel()       (no-op; already cancelled)
+```
+
+### Why pool.Close() is safe
+
+`pool.Close()` is a `defer` registered at the top of `main()`, so it only executes after `main()` returns. `wg.Wait()` is an explicit blocking call on line 129 that must complete — meaning every `wg.Done()` must have fired and every worker goroutine must have exited — before `main()` can return and any deferred call can run. There is no code path where `pool.Close()` can be reached while a worker goroutine is still alive or mid-transaction.
+
+### "Canceling statement due to user request" in Postgres logs
+
+Workers check `ctx.Done()` **between** operations, not during them. When `cancel()` fires, pgx immediately propagates the context cancellation to any query currently blocked inside `pool.Query()`. The query is interrupted server-side and Postgres logs `canceling statement due to user request`. The Go side handles this cleanly — `pool.Query()` returns a context error, the worker suppresses it, calls `wg.Done()`, and returns. This is expected behaviour; it cannot be avoided without using a detached (background) context for in-flight queries, which would defeat the purpose of graceful shutdown.
 
 ---
 
@@ -614,13 +655,24 @@ ORDER BY e.occurred_at DESC
 LIMIT 20
 ```
 
+### READ by IP (range scan)
+```sql
+SELECT id, session_id, event_type, occurred_at, severity, trace_id
+FROM events
+WHERE source_ip >= $1 AND source_ip <= $2   -- /24 subnet derived from sessionID[0]
+ORDER BY occurred_at DESC
+LIMIT 50
+```
+
+The subnet is deterministic: `octet = int(sessionID[0])`, so range is always `192.168.<octet>.0` – `192.168.<octet>.255`. With `CREATE_INDEXES=true` this hits `idx_events_source_ip` (B-tree); without indexes it falls back to a seq scan — both are intentionally valid scenarios to observe.
+
 ---
 
 ## Go Module Structure
 
 ```
-pg-loadgen/
-├── main.go
+pgstorm/
+├── main.go                  ← wires everything; godotenv; signal handling; graceful shutdown
 ├── go.mod
 ├── go.sum
 ├── config/
@@ -630,14 +682,18 @@ pg-loadgen/
 │   └── schema.go
 ├── workload/
 │   ├── worker.go
-│   ├── ops.go
-│   ├── payload.go
+│   ├── ops.go               ← 6 operations including read_by_ip
+│   ├── payload.go           ← two template pools; InitEventPool(); base64 bodies
 │   ├── ring.go              ← shared session UUID ring buffer
 │   └── stats.go             ← per-worker stats collector + 30s summary printer
 ├── metrics/
 │   ├── metrics.go
 │   ├── pool_collector.go    ← custom prometheus.Collector for pool.Stat()
-│   └── index_stats.go       ← background goroutine polling pg_stat_user_indexes
+│   ├── index_stats.go       ← background goroutine: table + index stats
+│   └── pg_stats.go          ← background goroutine: bgwriter + WAL; PG17-aware
+├── README.md
+├── .env.sample
+├── .gitignore
 ├── Dockerfile
 ├── docker-compose.yml
 └── k8s/
@@ -660,10 +716,11 @@ Every 30 seconds a summary is printed to stdout covering the window since the la
   │ op           │  count │  ops/s  │ p50 ms │ p95 ms │ p99 ms │
   ├──────────────┼────────┼─────────┼────────┼────────┼────────┤
   │ insert       │    645 │   21.5  │   12.3 │   45.2 │  112.4 │
-  │ read_simple  │    368 │   12.3  │    2.1 │    8.7 │   22.3 │
+  │ read_simple  │    290 │    9.7  │    2.1 │    8.7 │   22.3 │
   │ read_join    │    368 │   12.3  │    5.4 │   18.2 │   44.1 │
   │ update       │    276 │    9.2  │   15.7 │   52.3 │  134.2 │
   │ delete       │    185 │    6.2  │    8.9 │   31.4 │   78.6 │
+  │ read_by_ip   │     92 │    3.1  │    3.8 │   14.5 │   35.2 │
   └──────────────┴────────┴─────────┴────────┴────────┴────────┘
   pool  acquired=18  idle=2  total=20  max=25  │  workers=20
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -693,12 +750,28 @@ p50/p95/p99 are computed from the merged fixed-bucket histogram across all worke
 
 ---
 
+## PG17 Compatibility (`metrics/pg_stats.go`)
+
+`pg_stat_bgwriter` split in PG17: checkpoint columns moved to `pg_stat_checkpointer`; `buffers_backend` removed with no equivalent.
+
+`RunPGStatsLoop` detects the major version at startup (`SELECT current_setting('server_version_num')::int / 10000`) and branches:
+
+| Version | `collectBgwriterStats` path | Notes |
+|---|---|---|
+| PG14–16 | single query to `pg_stat_bgwriter` | all 7 columns present |
+| PG17+ | `pg_stat_checkpointer` (checkpoints, buffers_checkpoint) + `pg_stat_bgwriter` (buffers_clean only) | `buffers_backend` removed in PG17 with no equivalent; `pgloadgen_bgwriter_buffers_backend_total` is still registered and exposed but never incremented — it reads as a permanent 0. `rate()` on it returns 0; dashboards do not break. |
+
+All bgwriter/WAL metrics are delta-tracked (cumulative counters → Prometheus `rate()`-friendly).
+
+---
+
 ## Go Dependencies
 
 ```
 github.com/jackc/pgx/v5              # Postgres driver + pgxpool
 github.com/prometheus/client_golang  # Prometheus metrics
 github.com/google/uuid               # UUID generation
+github.com/joho/godotenv             # .env file loading (non-overwriting)
 ```
 
 No ORM. Raw SQL via pgx for maximum control and performance visibility.
@@ -816,9 +889,8 @@ spec:
 - Pool stats exposed via `PoolCollector` (custom `prometheus.Collector`) — never call `pool.Stat()` inside worker hot paths
 - UPDATE ops must rewrite the `metadata` JSONB column (Toast churn) — not just scalar fields
 - No `ORDER BY random()` anywhere — all row targeting goes through the ring buffer
-- INTERVAL parameters passed as `($1 * INTERVAL '1 minute')` — never interpolated as strings
 - `audit_log.id` is UUID (`gen_random_uuid()`) — no BIGSERIAL, no sequence hotspot
-- Graceful shutdown: on SIGTERM, stop workers, wait for in-flight ops, close pool
+- Graceful shutdown: see **Graceful Shutdown** section for the verified sequence — context hierarchy, LIFO defer order, and why pool.Close() is safe
 - Schema creation is idempotent (`CREATE TABLE IF NOT EXISTS`, `CREATE INDEX IF NOT EXISTS`) and race-safe via advisory lock (`db.MigrateWithLock`)
 
 ---
@@ -827,10 +899,21 @@ spec:
 
 | Goal | Action |
 |---|---|
-| More total concurrency | `kubectl scale deployment/pg-loadgen --replicas=N` |
+| More total concurrency | `kubectl scale deployment/pgstorm --replicas=N` |
 | More concurrency per pod | Increase `WORKERS` env var |
 | More write pressure | Increase `WRITE_PCT`, decrease others |
 | More I/O pressure | Increase `MAX_PAYLOAD_KB` |
 | Simulate paced load | Set `THINK_TIME_MS=50` |
 | Max stress | `THINK_TIME_MS=0`, `WORKERS=50`, replicas=10 |
 | Compare indexed vs raw throughput | Restart pods with `CREATE_INDEXES=true` (indexes built live on existing data) |
+
+---
+
+## Roadmap
+
+| # | Item | Priority | Notes |
+|---|---|---|---|
+| 1 | **Grafana + Prometheus in docker-compose** | High | Add `prometheus.yml` scrape config + Grafana container with auto-provisioned dashboard. `docker compose up` should give a full working dashboard with zero manual setup. |
+| 2 | **Pre-built Grafana dashboard JSON** (`grafana/dashboard.json`) | High | Panels: op throughput by type, p99 latency, dead tuple accumulation, WAL bytes/sec, checkpoint pressure, pool saturation. Importable even without bundling Grafana in Compose. |
+| 3 | **Unit tests for ring buffer and config validation** | Medium | Ring: Push/Sample ordering, empty case, wraparound. Config: sum=100 check, min<max payload. No DB dependency — pure Go, fast. |
+| 4 | **`buffers_backend` startup log note** | Low | `pgloadgen_bgwriter_buffers_backend_total` is already emitted as 0 on PG17 (dashboards don't break). Optional improvement: log a one-time note at startup when PG17+ is detected so operators know the metric is intentionally always 0. |

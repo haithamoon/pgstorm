@@ -39,7 +39,7 @@ func MigrateWithLock(ctx context.Context, pool *pgxpool.Pool, cfg *config.Config
 		log.Println("schema setup complete — releasing lock")
 	} else {
 		log.Println("migration lock held by another pod — waiting for schema")
-		if err := WaitForSchema(ctx, pool); err != nil {
+		if err := WaitForSchema(ctx, pool, cfg.CreateIndexes); err != nil {
 			return fmt.Errorf("wait for schema: %w", err)
 		}
 		log.Println("schema ready — proceeding")
@@ -102,7 +102,12 @@ func CreateIndexes(ctx context.Context, pool *pgxpool.Pool) error {
 	return err
 }
 
-func WaitForSchema(ctx context.Context, pool *pgxpool.Pool) error {
+// sentinelIndex is the last index created by CreateIndexes. Followers wait for
+// it when CREATE_INDEXES=true so they don't start workers while CREATE INDEX
+// still holds ShareLock on the tables (which would block DML).
+const sentinelIndex = "idx_audit_log_changed_at"
+
+func WaitForSchema(ctx context.Context, pool *pgxpool.Pool, waitIndexes bool) error {
 	required := []string{"sessions", "events", "audit_log"}
 	for {
 		select {
@@ -110,12 +115,26 @@ func WaitForSchema(ctx context.Context, pool *pgxpool.Pool) error {
 			return ctx.Err()
 		case <-time.After(500 * time.Millisecond):
 			missing := checkMissingTables(ctx, pool, required)
-			if len(missing) == 0 {
-				return nil
+			if len(missing) > 0 {
+				log.Printf("waiting for tables: %v", missing)
+				continue
 			}
-			log.Printf("waiting for tables: %v", missing)
+			if waitIndexes && !indexExists(ctx, pool, sentinelIndex) {
+				log.Printf("waiting for indexes (CREATE_INDEXES=true)")
+				continue
+			}
+			return nil
 		}
 	}
+}
+
+func indexExists(ctx context.Context, pool *pgxpool.Pool, name string) bool {
+	var exists bool
+	pool.QueryRow(ctx,
+		"SELECT EXISTS(SELECT 1 FROM pg_indexes WHERE schemaname = 'public' AND indexname = $1)",
+		name,
+	).Scan(&exists) //nolint
+	return exists
 }
 
 func checkMissingTables(ctx context.Context, pool *pgxpool.Pool, required []string) []string {
