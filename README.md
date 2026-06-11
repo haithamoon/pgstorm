@@ -1,189 +1,339 @@
 # pg-loadgen
 
-A Go-based PostgreSQL load generator that hammers a database with a realistic mixed workload — inserts, reads, joins, updates, and deletes — using large JSONB payloads to stress heap I/O and Toast storage.
+A Go-based PostgreSQL load generator that hammers a database with a realistic mixed workload — INSERT, READ, JOIN, UPDATE, DELETE, and IP-range reads — using large JSONB payloads to stress **heap I/O**, **Toast storage**, and **MVCC dead tuple accumulation**.
 
-Designed to run as multiple replicas on Kubernetes or Docker Compose, with each pod exposing a Prometheus `/metrics` endpoint.
+Most Postgres load generators just fire INSERTs. pg-loadgen is specifically designed to exercise the parts of Postgres that matter most in production: autovacuum lag, Toast fragmentation, WAL amplification, and checkpoint pressure. Each replica exposes a Prometheus `/metrics` endpoint so you can observe everything in real time.
 
----
-
-## Features
-
-- **Mixed workload** — configurable percentage split across INSERT, READ (simple), READ (join), UPDATE, DELETE
-- **Fat rows** — JSONB payloads of 8–16 KB per event row; 4–8 KB per session row (stresses Toast storage and MVCC)
-- **Ring buffer targeting** — shared in-process circular buffer of recently inserted session UUIDs; no `ORDER BY random()` full scans
-- **Micro-mutation engine** — 100 pre-rendered payload templates mutated on every use; busts Postgres buffer pool deduplication
-- **Advisory lock migration** — exactly one pod runs DDL at startup; others wait passively
-- **Prometheus metrics** — ops counter, latency histogram (p50–p99), active workers gauge, pool stats via custom collector
-- **30s rolling summary** — printed to stdout every 30 seconds with per-op counts, rates, and latency percentiles
-- **Graceful shutdown** — SIGTERM drains in-flight ops before exit
-- **Horizontal scaling** — stateless pods; scale via `replicas` in Compose or `kubectl scale`
+**Supported Postgres versions:** 14, 15, 16, 17
 
 ---
 
-## Quick Start (Docker Compose)
+## Table of Contents
+
+- [Quick Start](#quick-start)
+- [How It Works](#how-it-works)
+- [Schema](#schema)
+- [Configuration](#configuration)
+- [Metrics Reference](#metrics-reference)
+- [What to Watch](#what-to-watch)
+- [Running Multiple Replicas](#running-multiple-replicas)
+
+---
+
+## Quick Start
+
+**Prerequisites:** Docker, Docker Compose
 
 ```bash
-git clone <repo-url>
+git clone https://github.com/your-username/pg-loadgen
 cd pg-loadgen
-
 docker compose up --build
 ```
 
-Postgres data is persisted locally in `./pgdata/`. To start fresh:
+The load generator starts immediately once Postgres is healthy. Metrics are available at:
 
 ```bash
-docker compose down
-rm -rf ./pgdata
-docker compose up --build
+curl http://localhost:9090/metrics
 ```
 
----
-
-## Configuration
-
-All settings are environment variables. Set them in `docker-compose.yml` or as K8s ConfigMap entries.
-
-| Variable | Default | Description |
-|---|---|---|
-| `PG_DSN` | `postgres://loadgen:loadgen@localhost:5432/loadtest?sslmode=disable` | Postgres connection string |
-| `WORKERS` | `20` | Goroutines per pod |
-| `CREATE_INDEXES` | `false` | `true` creates B-tree indexes on scalar columns; `false` = PK-only baseline |
-| `RING_SIZE` | `10000` | Capacity of the shared session UUID ring buffer |
-| `WRITE_PCT` | `35` | % of ops that are INSERT transactions |
-| `READ_SIMPLE_PCT` | `20` | % of ops that are simple event reads |
-| `READ_JOIN_PCT` | `20` | % of ops that are 3-table JOIN reads |
-| `UPDATE_PCT` | `15` | % of ops that are UPDATE + audit (rewrites JSONB) |
-| `DELETE_PCT` | `10` | % of ops that are batch event deletes |
-| `MIN_PAYLOAD_KB` | `8` | Minimum size of `events.payload` JSONB |
-| `MAX_PAYLOAD_KB` | `16` | Maximum size of `events.payload` JSONB |
-| `DELETE_BATCH_SIZE` | `50` | Rows deleted per DELETE op |
-| `DELETE_OLDER_THAN_MINS` | `10` | (informational) |
-| `THINK_TIME_MS` | `0` | Sleep between ops per worker; `0` = full throttle |
-| `METRICS_PORT` | `9090` | Port for `/metrics`, `/healthz`, `/readyz` |
-| `RUN_DURATION_SECS` | `0` | Run duration in seconds; `0` = run forever |
-| `SUMMARY_INTERVAL_SECS` | `30` | How often to print the rolling summary to stdout |
-| `LOG_LEVEL` | `info` | Log verbosity |
-
-> All percentage vars (`WRITE_PCT`, `READ_SIMPLE_PCT`, `READ_JOIN_PCT`, `UPDATE_PCT`, `DELETE_PCT`) must sum to exactly 100.
-
----
-
-## 30-Second Summary
-
-Every `SUMMARY_INTERVAL_SECS` seconds the load generator prints a summary to stdout:
-
-```
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  30s summary [21:10:50 | +30s elapsed]
-  total    1,842 ops   61.4 ops/s   errors: 3
-  ┌──────────────┬────────┬─────────┬────────┬────────┬────────┐
-  │ op           │  count │  ops/s  │ p50 ms │ p95 ms │ p99 ms │
-  ├──────────────┼────────┼─────────┼────────┼────────┼────────┤
-  │ insert       │    645 │   21.5  │   12.3 │   45.2 │  112.4 │
-  │ read_simple  │    368 │   12.3  │    2.1 │    8.7 │   22.3 │
-  │ read_join    │    368 │   12.3  │    5.4 │   18.2 │   44.1 │
-  │ update       │    276 │    9.2  │   15.7 │   52.3 │  134.2 │
-  │ delete       │    185 │    6.2  │    8.9 │   31.4 │   78.6 │
-  └──────────────┴────────┴─────────┴────────┴────────┴────────┘
-  pool  acquired=18  idle=2  total=20  max=25  │  workers=20
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-```
-
-Stats are collected per-worker with no lock on the hot path, then merged at print time.
-
----
-
-## Prometheus Metrics
-
-Each pod exposes metrics at `http://<pod>:9090/metrics`.
-
-| Metric | Type | Labels |
-|---|---|---|
-| `pgloadgen_ops_total` | Counter | `op`, `status` |
-| `pgloadgen_op_duration_seconds` | Histogram | `op` |
-| `pgloadgen_workers_active` | Gauge | — |
-| `pgloadgen_pool_acquired_conns` | Gauge | — |
-| `pgloadgen_pool_idle_conns` | Gauge | — |
-| `pgloadgen_pool_total_conns` | Gauge | — |
-| `pgloadgen_pool_max_conns` | Gauge | — |
-| `pgloadgen_table_size_bytes` | Gauge | `table` |
-| `pgloadgen_table_live_tuples` | Gauge | `table` |
-| `pgloadgen_table_dead_tuples` | Gauge | `table` |
-| `pgloadgen_index_size_bytes` | Gauge | `index`, `table` | _(only when `CREATE_INDEXES=true`)_ |
-| `pgloadgen_index_scans_total` | Counter | `index`, `table` | _(only when `CREATE_INDEXES=true`)_ |
-
-**Useful PromQL:**
-```promql
-# Dead tuple ratio — autovacuum pressure proxy
-pgloadgen_table_dead_tuples / (pgloadgen_table_live_tuples + pgloadgen_table_dead_tuples)
-
-# Index vs table size ratio — B-tree write amplification
-pgloadgen_index_size_bytes / on(table) group_left pgloadgen_table_size_bytes
-
-# Index scan rate
-rate(pgloadgen_index_scans_total[1m])
-```
-
-Health endpoints: `GET /healthz` (liveness), `GET /readyz` (readiness).
-
----
-
-## Scaling
-
-| Goal | Action |
-|---|---|
-| More total concurrency | Increase `replicas` in Compose / `kubectl scale deployment/pg-loadgen --replicas=N` |
-| More concurrency per pod | Increase `WORKERS` |
-| More write pressure | Increase `WRITE_PCT`, decrease others (must sum to 100) |
-| More I/O pressure | Increase `MAX_PAYLOAD_KB` |
-| Simulate paced load | Set `THINK_TIME_MS=50` |
-| Max stress | `THINK_TIME_MS=0`, `WORKERS=50`, replicas=10 |
-| Compare indexed vs raw throughput | Restart pods with `CREATE_INDEXES=true` (indexes built live on existing data) |
-
----
-
-## Kubernetes
+To wipe all data and start fresh:
 
 ```bash
-# Apply manifests
-kubectl apply -f k8s/
-
-# Create the DSN secret
-kubectl create secret generic pg-loadgen-secret \
-  --from-literal=PG_DSN='postgres://user:pass@host:5432/dbname?sslmode=disable'
-
-# Scale
-kubectl scale deployment/pg-loadgen --replicas=5
+docker compose down && rm -rf ./pgdata && docker compose up --build
 ```
 
-The `k8s/deployment.yaml` includes liveness and readiness probes. `k8s/service.yaml` exposes port 9090 for Prometheus scraping.
+To run with indexes enabled and observe the difference in query plans and index scan rates:
+
+```bash
+CREATE_INDEXES=true docker compose up --build
+```
+
+To build and run locally against an existing Postgres instance:
+
+```bash
+go build ./...
+PG_DSN="postgres://user:pass@localhost:5432/mydb?sslmode=disable" WORKERS=5 ./pg-loadgen
+```
+
+---
+
+## How It Works
+
+Each worker goroutine runs a continuous loop: pick an operation according to the configured percentages, execute it against Postgres, record latency and outcome, repeat.
+
+A **ring buffer** of recently inserted session UUIDs is shared across all workers. UPDATE, DELETE, and READ operations sample from it rather than using `ORDER BY random()`, which avoids full table scans and keeps the workload targeting real data.
+
+**Operations and default mix:**
+
+| Operation | Env var | Default | Description |
+|---|---|---|---|
+| `insert` | `WRITE_PCT` | 35% | BEGIN → sessions row + 1–3 events rows + audit_log row → COMMIT |
+| `read_simple` | `READ_SIMPLE_PCT` | 15% | Fetch the 20 most recent events for a ring-sampled session |
+| `read_join` | `READ_JOIN_PCT` | 20% | 3-table join across sessions, events, and audit_log filtered by severity |
+| `update` | `UPDATE_PCT` | 15% | `SELECT FOR UPDATE SKIP LOCKED` → rewrite session metadata JSONB → audit_log row |
+| `delete` | `DELETE_PCT` | 10% | Delete a batch of the oldest events for a ring-sampled session |
+| `read_by_ip` | `READ_IP_PCT` | 5% | B-tree range scan on `events.source_ip` within a deterministic /24 subnet |
+
+All six percentages must sum to exactly 100.
+
+**Payload design:**
+
+Every JSONB value contains realistic-looking fields: HTTP request and response headers and bodies, stack traces, tags, numeric metrics, and nested context. Request and response bodies are base64-encoded random bytes — high entropy content that Postgres's pglz compressor cannot deflate — ensuring every large value exercises real Toast I/O rather than compressed storage. Payload sizes are controlled by `MIN_PAYLOAD_KB` and `MAX_PAYLOAD_KB`.
+
+**Payload sizes per table:**
+
+| Table | Column | Size |
+|---|---|---|
+| `sessions` | `metadata` | 4–8 KB (fixed) |
+| `events` | `payload` | `MIN_PAYLOAD_KB`–`MAX_PAYLOAD_KB` (default 8–16 KB) |
+| `audit_log` | `diff` | 2–4 KB (fixed) |
+
+All three JSONB values exceed Postgres's ~2 KB Toast threshold on every write, so every insert and update exercises out-of-line Toast storage.
 
 ---
 
 ## Schema
 
-Three tables with realistic foreign keys and unindexed JSONB columns (intentional — GIN indexes on 8–16 KB blobs generate excessive WAL write-amplification):
+Three tables are created automatically on first run using `CREATE TABLE IF NOT EXISTS`. Schema creation is race-safe via `pg_try_advisory_lock` — exactly one replica runs DDL, the others wait and proceed once the schema is ready.
 
-- **`sessions`** — 4–8 KB `metadata` JSONB
-- **`events`** — 8–16 KB `payload` JSONB, FK to `sessions`
-- **`audit_log`** — 2–4 KB `diff` JSONB, tracks all mutations
+```sql
+sessions (
+    id          UUID PRIMARY KEY,
+    user_id     UUID NOT NULL,
+    started_at  TIMESTAMPTZ NOT NULL,
+    ended_at    TIMESTAMPTZ,
+    region      TEXT NOT NULL,
+    metadata    JSONB NOT NULL,   -- 4–8 KB
+    status      TEXT NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL
+)
 
-Schema creation is idempotent (`CREATE TABLE IF NOT EXISTS`) and race-safe via `pg_try_advisory_lock` — only one pod runs DDL even when all replicas start simultaneously.
+events (
+    id          UUID PRIMARY KEY,
+    session_id  UUID NOT NULL REFERENCES sessions(id),
+    event_type  TEXT NOT NULL,
+    occurred_at TIMESTAMPTZ NOT NULL,
+    payload     JSONB NOT NULL,   -- 8–16 KB by default
+    severity    TEXT NOT NULL,
+    trace_id    TEXT NOT NULL,
+    source_ip   INET,             -- random from 192.168.0.0/16
+    created_at  TIMESTAMPTZ NOT NULL
+)
+
+audit_log (
+    id          UUID PRIMARY KEY,
+    entity_type TEXT NOT NULL,
+    entity_id   UUID NOT NULL,
+    action      TEXT NOT NULL,
+    changed_by  UUID NOT NULL,
+    changed_at  TIMESTAMPTZ NOT NULL,
+    diff        JSONB NOT NULL,   -- 2–4 KB
+    checksum    TEXT NOT NULL
+)
+```
+
+When `CREATE_INDEXES=true`, 8 additional B-tree indexes are created:
+
+| Index | Table | Columns |
+|---|---|---|
+| `idx_sessions_user_id` | sessions | user_id |
+| `idx_sessions_status_created` | sessions | status, created_at DESC |
+| `idx_events_session_id` | events | session_id |
+| `idx_events_occurred_at` | events | occurred_at DESC |
+| `idx_events_severity_occurred` | events | severity, occurred_at DESC |
+| `idx_events_source_ip` | events | source_ip |
+| `idx_audit_log_entity_id` | audit_log | entity_id, changed_at DESC |
+| `idx_audit_log_changed_at` | audit_log | changed_at DESC |
+
+Indexes can be created on a live database with existing data. Postgres builds them under concurrent load, which is itself a useful scenario to observe.
 
 ---
 
-## Development
+## Configuration
 
-```bash
-# Build
-go build ./...
+All configuration is via environment variables.
 
-# Vet
-go vet ./...
+### Connection
 
-# Run locally (needs Postgres on localhost:5432)
-PG_DSN=postgres://loadgen:loadgen@localhost:5432/loadtest?sslmode=disable \
-  WORKERS=5 RUN_DURATION_SECS=60 ./pg-loadgen
+| Variable | Default | Description |
+|---|---|---|
+| `PG_DSN` | `postgres://loadgen:loadgen@localhost:5432/loadtest?sslmode=disable` | Postgres connection string |
+
+### Workload
+
+| Variable | Default | Description |
+|---|---|---|
+| `WORKERS` | `20` | Number of concurrent worker goroutines per replica |
+| `WRITE_PCT` | `35` | % of operations that are INSERT transactions |
+| `READ_SIMPLE_PCT` | `15` | % of operations that are simple event reads |
+| `READ_JOIN_PCT` | `20` | % of operations that are 3-table join reads |
+| `UPDATE_PCT` | `15` | % of operations that are session UPDATEs |
+| `DELETE_PCT` | `10` | % of operations that are batch event deletes |
+| `READ_IP_PCT` | `5` | % of operations that are source_ip range reads |
+| `THINK_TIME_MS` | `0` | Sleep between operations per worker (ms); `0` = full throttle |
+| `RUN_DURATION_SECS` | `0` | Stop after N seconds; `0` = run forever |
+
+> `WRITE_PCT + READ_SIMPLE_PCT + READ_JOIN_PCT + UPDATE_PCT + DELETE_PCT + READ_IP_PCT` must equal 100. The process exits at startup if they do not.
+
+### Payload Size
+
+| Variable | Default | Description |
+|---|---|---|
+| `MIN_PAYLOAD_KB` | `8` | Minimum `events.payload` size in KB |
+| `MAX_PAYLOAD_KB` | `16` | Maximum `events.payload` size in KB |
+
+### Schema
+
+| Variable | Default | Description |
+|---|---|---|
+| `CREATE_INDEXES` | `false` | Create B-tree indexes on startup (safe to enable on existing data) |
+| `RING_SIZE` | `10000` | Capacity of the shared session UUID ring buffer |
+| `DELETE_BATCH_SIZE` | `50` | Maximum events deleted per DELETE operation |
+
+### Observability
+
+| Variable | Default | Description |
+|---|---|---|
+| `METRICS_PORT` | `9090` | Port for the Prometheus `/metrics` endpoint |
+| `SUMMARY_INTERVAL_SECS` | `30` | How often to print the per-op summary to stdout |
+| `INDEX_STATS_INTERVAL_SECS` | `30` | How often to poll Postgres for table and index stats |
+| `LOG_LEVEL` | `info` | Log verbosity |
+
+---
+
+## Metrics Reference
+
+All metrics are prefixed with `pgloadgen_`. The `/metrics` endpoint also exposes Go runtime and process metrics from the default Prometheus registry.
+
+### Operation Metrics
+
+| Metric | Type | Labels | Description |
+|---|---|---|---|
+| `pgloadgen_ops_total` | Counter | `op`, `status` | Total operations completed; `status` is `ok` or `error` |
+| `pgloadgen_op_duration_seconds` | Histogram | `op` | Operation latency; buckets at 1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500 ms |
+| `pgloadgen_workers_active` | Gauge | — | Number of operations currently in flight |
+
+### Connection Pool
+
+| Metric | Type | Description |
+|---|---|---|
+| `pgloadgen_pool_acquired_conns` | Gauge | Connections currently checked out by workers |
+| `pgloadgen_pool_idle_conns` | Gauge | Idle connections waiting in the pool |
+| `pgloadgen_pool_total_conns` | Gauge | Total open connections (acquired + idle) |
+| `pgloadgen_pool_max_conns` | Gauge | Pool capacity (`WORKERS + 5`) |
+
+### Table Stats *(always collected)*
+
+| Metric | Type | Labels | Description |
+|---|---|---|---|
+| `pgloadgen_table_size_bytes` | Gauge | `table` | Heap size in bytes (excludes Toast and indexes) |
+| `pgloadgen_table_live_tuples` | Gauge | `table` | Estimated live row count from `pg_stat_user_tables` |
+| `pgloadgen_table_dead_tuples` | Gauge | `table` | Estimated dead row count — proxy for MVCC bloat |
+| `pgloadgen_table_mod_since_analyze` | Gauge | `table` | Rows modified since last analyze; high value means stale planner stats |
+| `pgloadgen_table_autovacuum_total` | Counter | `table` | Autovacuum runs observed since pod start |
+| `pgloadgen_table_autoanalyze_total` | Counter | `table` | Autoanalyze runs observed since pod start |
+
+### Index Stats *(only when `CREATE_INDEXES=true`)*
+
+| Metric | Type | Labels | Description |
+|---|---|---|---|
+| `pgloadgen_index_size_bytes` | Gauge | `index`, `table` | Index size in bytes |
+| `pgloadgen_index_scans_total` | Counter | `index`, `table` | Index scans observed since pod start |
+
+All 11 indexes (8 explicit + 3 primary keys) are tracked automatically by querying `pg_stat_user_indexes` — no hardcoded index names.
+
+### Checkpoint and bgwriter Stats
+
+Sourced from `pg_stat_bgwriter` on PG14–16 and split across `pg_stat_bgwriter` + `pg_stat_checkpointer` on PG17+. The version is detected automatically at startup.
+
+| Metric | Type | Description |
+|---|---|---|
+| `pgloadgen_bgwriter_checkpoints_timed_total` | Counter | Checkpoints triggered by `checkpoint_timeout` |
+| `pgloadgen_bgwriter_checkpoints_req_total` | Counter | Checkpoints triggered by WAL segment demand |
+| `pgloadgen_bgwriter_buffers_checkpoint_total` | Counter | Shared buffers written during checkpoints |
+| `pgloadgen_bgwriter_buffers_clean_total` | Counter | Shared buffers written by the background writer |
+| `pgloadgen_bgwriter_buffers_backend_total` | Counter | Shared buffers written directly by backends *(PG14–16 only)* |
+| `pgloadgen_bgwriter_checkpoint_write_seconds_total` | Counter | Time spent writing files during checkpoints |
+| `pgloadgen_bgwriter_checkpoint_sync_seconds_total` | Counter | Time spent syncing files during checkpoints |
+
+### WAL Stats *(PG14+ required)*
+
+| Metric | Type | Description |
+|---|---|---|
+| `pgloadgen_wal_bytes_total` | Counter | Total WAL bytes generated |
+| `pgloadgen_wal_records_total` | Counter | Total WAL records generated |
+| `pgloadgen_wal_fpi_total` | Counter | Full-page images written to WAL |
+| `pgloadgen_wal_buffers_full_total` | Counter | Times WAL was flushed because WAL buffers were full |
+
+---
+
+## What to Watch
+
+These PromQL expressions surface the most important Postgres health signals during a load test.
+
+**Throughput and error rate:**
+```promql
+rate(pgloadgen_ops_total{status="ok"}[1m])
+rate(pgloadgen_ops_total{status="error"}[1m])
 ```
 
-Dependencies: `github.com/jackc/pgx/v5`, `github.com/prometheus/client_golang`, `github.com/google/uuid`. All vendored in `vendor/`.
+**Latency percentiles by operation:**
+```promql
+histogram_quantile(0.99, rate(pgloadgen_op_duration_seconds_bucket[1m]))
+histogram_quantile(0.50, rate(pgloadgen_op_duration_seconds_bucket[1m]))
+```
+
+**MVCC dead tuple accumulation** — rising dead tuples with infrequent autovacuum means bloat is building faster than it is being reclaimed:
+```promql
+pgloadgen_table_dead_tuples
+rate(pgloadgen_table_autovacuum_total[5m])
+```
+
+**WAL write amplification** — how many bytes of WAL each write generates, and full-page image spikes after each checkpoint:
+```promql
+rate(pgloadgen_wal_bytes_total[1m])
+rate(pgloadgen_wal_fpi_total[1m])
+```
+
+**Checkpoint pressure** — `checkpoints_req` should be near zero; a non-zero rate means WAL is filling up faster than `checkpoint_timeout`:
+```promql
+rate(pgloadgen_bgwriter_checkpoints_req_total[5m])
+```
+
+**Backend buffer writes** *(PG14–16)* — backends forced to write dirty buffers directly is a sign the bgwriter cannot keep up:
+```promql
+rate(pgloadgen_bgwriter_buffers_backend_total[1m])
+```
+
+**Index utilisation** *(requires `CREATE_INDEXES=true`)*:
+```promql
+rate(pgloadgen_index_scans_total[1m])
+pgloadgen_index_size_bytes
+```
+
+**Connection pool saturation:**
+```promql
+pgloadgen_pool_acquired_conns / pgloadgen_pool_max_conns
+```
+
+---
+
+## Running Multiple Replicas
+
+pg-loadgen is safe to run as multiple replicas against the same database. Advisory lock migration ensures exactly one replica runs DDL at startup; the others wait passively until the schema is ready.
+
+To scale up in Docker Compose:
+
+```bash
+docker compose up --build --scale loadgen=3
+```
+
+Each replica exposes its metrics on a randomly assigned host port (mapped from container port 9090). To scrape all replicas, use Docker service discovery in your Prometheus config or add each host port explicitly.
+
+Health endpoints available on every replica:
+
+| Endpoint | Description |
+|---|---|
+| `GET /healthz` | Liveness — returns 200 once the HTTP server is up |
+| `GET /readyz` | Readiness — returns 200 once workers have started |
+| `GET /metrics` | Prometheus metrics |
