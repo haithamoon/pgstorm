@@ -10,8 +10,10 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-// bgwriter metrics — from pg_stat_bgwriter (PG14–16).
-// Note: in PG17 checkpoint columns moved to pg_stat_checkpointer.
+// bgwriter / checkpoint metrics.
+// PG14–16: all sourced from pg_stat_bgwriter.
+// PG17+:   checkpoint columns moved to pg_stat_checkpointer;
+//          buffers_backend removed entirely (no equivalent view).
 var (
 	bgwriterCheckpointsTimed = prometheus.NewCounter(prometheus.CounterOpts{
 		Namespace: namespace,
@@ -36,7 +38,7 @@ var (
 	bgwriterBuffersBackend = prometheus.NewCounter(prometheus.CounterOpts{
 		Namespace: namespace,
 		Name:      "bgwriter_buffers_backend_total",
-		Help:      "Shared buffers written directly by backends; high rate means bgwriter cannot keep up.",
+		Help:      "Shared buffers written directly by backends (PG14–16 only; not available on PG17+).",
 	})
 	bgwriterCheckpointWriteSeconds = prometheus.NewCounter(prometheus.CounterOpts{
 		Namespace: namespace,
@@ -88,8 +90,15 @@ func RegisterPGStats() {
 	)
 }
 
-// RunPGStatsLoop polls pg_stat_bgwriter and pg_stat_wal on interval until ctx is done.
+// RunPGStatsLoop polls pg_stat_bgwriter/pg_stat_checkpointer and pg_stat_wal on interval.
 func RunPGStatsLoop(ctx context.Context, pool *pgxpool.Pool, interval time.Duration) {
+	pgMajor, err := detectPGMajorVersion(ctx, pool)
+	if err != nil {
+		log.Printf("could not detect postgres version: %v — assuming PG16 query paths", err)
+		pgMajor = 16
+	}
+	log.Printf("postgres major version: %d", pgMajor)
+
 	tracker := newPGStatsTracker()
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -98,7 +107,7 @@ func RunPGStatsLoop(ctx context.Context, pool *pgxpool.Pool, interval time.Durat
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := collectBgwriterStats(ctx, pool, tracker); err != nil && ctx.Err() == nil {
+			if err := collectBgwriterStats(ctx, pool, tracker, pgMajor); err != nil && ctx.Err() == nil {
 				log.Printf("bgwriter stats error: %v", err)
 			}
 			if err := collectWALStats(ctx, pool, tracker); err != nil && ctx.Err() == nil {
@@ -106,6 +115,12 @@ func RunPGStatsLoop(ctx context.Context, pool *pgxpool.Pool, interval time.Durat
 			}
 		}
 	}
+}
+
+func detectPGMajorVersion(ctx context.Context, pool *pgxpool.Pool) (int, error) {
+	var major int
+	err := pool.QueryRow(ctx, "SELECT current_setting('server_version_num')::int / 10000").Scan(&major)
+	return major, err
 }
 
 // pgStatsTracker delta-tracks cumulative float64 values from Postgres system views.
@@ -129,7 +144,15 @@ func (t *pgStatsTracker) delta(key string, current float64) float64 {
 	return current - prev
 }
 
-func collectBgwriterStats(ctx context.Context, pool *pgxpool.Pool, tracker *pgStatsTracker) error {
+func collectBgwriterStats(ctx context.Context, pool *pgxpool.Pool, tracker *pgStatsTracker, pgMajor int) error {
+	if pgMajor >= 17 {
+		return collectBgwriterStatsPG17(ctx, pool, tracker)
+	}
+	return collectBgwriterStatsPG16(ctx, pool, tracker)
+}
+
+// collectBgwriterStatsPG16 queries pg_stat_bgwriter which holds all columns on PG14–16.
+func collectBgwriterStatsPG16(ctx context.Context, pool *pgxpool.Pool, tracker *pgStatsTracker) error {
 	var cpTimed, cpReq, bufCheckpoint, bufClean, bufBackend, writeTime, syncTime float64
 	err := pool.QueryRow(ctx, `
 		SELECT
@@ -151,9 +174,40 @@ func collectBgwriterStats(ctx context.Context, pool *pgxpool.Pool, tracker *pgSt
 	bgwriterBuffersCheckpoint.Add(tracker.delta("buf_checkpoint", bufCheckpoint))
 	bgwriterBuffersClean.Add(tracker.delta("buf_clean", bufClean))
 	bgwriterBuffersBackend.Add(tracker.delta("buf_backend", bufBackend))
-	// pg reports checkpoint times in milliseconds; convert to seconds
 	bgwriterCheckpointWriteSeconds.Add(tracker.delta("cp_write_ms", writeTime) / 1000)
 	bgwriterCheckpointSyncSeconds.Add(tracker.delta("cp_sync_ms", syncTime) / 1000)
+	return nil
+}
+
+// collectBgwriterStatsPG17 uses pg_stat_checkpointer (new in PG17) for checkpoint metrics
+// and pg_stat_bgwriter for the remaining bgwriter-only metrics.
+// buffers_backend was removed in PG17 with no direct replacement, so it is not collected.
+func collectBgwriterStatsPG17(ctx context.Context, pool *pgxpool.Pool, tracker *pgStatsTracker) error {
+	// Checkpoint metrics — moved to pg_stat_checkpointer in PG17.
+	// Column renames: checkpoints_timed→num_timed, checkpoints_req→num_requested,
+	// buffers_checkpoint→buffers_written; write_time/sync_time kept same names.
+	var cpTimed, cpReq, bufCheckpoint, writeTime, syncTime float64
+	err := pool.QueryRow(ctx, `
+		SELECT num_timed, num_requested, buffers_written, write_time, sync_time
+		FROM pg_stat_checkpointer
+	`).Scan(&cpTimed, &cpReq, &bufCheckpoint, &writeTime, &syncTime)
+	if err != nil {
+		return err
+	}
+	bgwriterCheckpointsTimed.Add(tracker.delta("cp_timed", cpTimed))
+	bgwriterCheckpointsReq.Add(tracker.delta("cp_req", cpReq))
+	bgwriterBuffersCheckpoint.Add(tracker.delta("buf_checkpoint", bufCheckpoint))
+	bgwriterCheckpointWriteSeconds.Add(tracker.delta("cp_write_ms", writeTime) / 1000)
+	bgwriterCheckpointSyncSeconds.Add(tracker.delta("cp_sync_ms", syncTime) / 1000)
+
+	// bgwriter-only metrics — still in pg_stat_bgwriter on PG17.
+	var bufClean float64
+	err = pool.QueryRow(ctx, `SELECT buffers_clean FROM pg_stat_bgwriter`).Scan(&bufClean)
+	if err != nil {
+		return err
+	}
+	bgwriterBuffersClean.Add(tracker.delta("buf_clean", bufClean))
+
 	return nil
 }
 
