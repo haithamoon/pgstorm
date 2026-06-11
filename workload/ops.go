@@ -9,9 +9,17 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jackc/pgx/v5/pgconn"
 	"pg-loadgen/config"
 )
+
+// DBPool is the subset of pgxpool.Pool used by Executor.
+// *pgxpool.Pool satisfies this interface.
+type DBPool interface {
+	Begin(ctx context.Context) (pgx.Tx, error)
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
+	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
+}
 
 const (
 	OpInsert     = "insert"
@@ -31,13 +39,13 @@ var severities = []string{"info", "warn", "error", "debug"}
 var eventTypes = []string{"request", "response", "error", "auth", "payment", "audit", "system"}
 
 type Executor struct {
-	pool *pgxpool.Pool
+	pool DBPool
 	ring *SessionRing
 	cfg  *config.Config
 	rng  *rand.Rand
 }
 
-func NewExecutor(pool *pgxpool.Pool, ring *SessionRing, cfg *config.Config, rng *rand.Rand) *Executor {
+func NewExecutor(pool DBPool, ring *SessionRing, cfg *config.Config, rng *rand.Rand) *Executor {
 	return &Executor{pool: pool, ring: ring, cfg: cfg, rng: rng}
 }
 
@@ -208,7 +216,9 @@ func (e *Executor) doUpdate(ctx context.Context) error {
 		sessionID,
 	).Scan(&lockedID)
 	if err == pgx.ErrNoRows {
-		return tx.Rollback(ctx)
+		// Session is locked by another worker; skip silently.
+		// The deferred Rollback handles cleanup.
+		return nil
 	}
 	if err != nil {
 		return fmt.Errorf("lock session: %w", err)

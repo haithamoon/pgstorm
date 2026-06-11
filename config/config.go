@@ -63,6 +63,10 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("operation percentages must sum to 100, got %d", total)
 	}
 
+	if cfg.MinPayloadKB > cfg.MaxPayloadKB {
+		return nil, fmt.Errorf("MIN_PAYLOAD_KB (%d) must not exceed MAX_PAYLOAD_KB (%d)", cfg.MinPayloadKB, cfg.MaxPayloadKB)
+	}
+
 	return cfg, nil
 }
 
