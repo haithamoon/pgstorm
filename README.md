@@ -1,8 +1,8 @@
-# pg-loadgen
+# pgstorm
 
 A Go-based PostgreSQL load generator that hammers a database with a realistic mixed workload — INSERT, READ, JOIN, UPDATE, DELETE, and IP-range reads — using large JSONB payloads to stress **heap I/O**, **Toast storage**, and **MVCC dead tuple accumulation**.
 
-Most Postgres load generators just fire INSERTs. pg-loadgen is specifically designed to exercise the parts of Postgres that matter most in production: autovacuum lag, Toast fragmentation, WAL amplification, and checkpoint pressure. Each replica exposes a Prometheus `/metrics` endpoint so you can observe everything in real time.
+Most Postgres load generators just fire INSERTs. pgstorm is specifically designed to exercise the parts of Postgres that matter most in production: autovacuum lag, Toast fragmentation, WAL amplification, and checkpoint pressure. Each replica exposes a Prometheus `/metrics` endpoint so you can observe everything in real time.
 
 **Supported Postgres versions:** 14, 15, 16, 17
 
@@ -25,8 +25,8 @@ Most Postgres load generators just fire INSERTs. pg-loadgen is specifically desi
 **Prerequisites:** Docker, Docker Compose
 
 ```bash
-git clone https://github.com/your-username/pg-loadgen
-cd pg-loadgen
+git clone https://github.com/haithamoon/pgstorm
+cd pgstorm
 docker compose up --build
 ```
 
@@ -52,7 +52,7 @@ To build and run locally against an existing Postgres instance:
 
 ```bash
 go build ./...
-PG_DSN="postgres://user:pass@localhost:5432/mydb?sslmode=disable" WORKERS=5 ./pg-loadgen
+PG_DSN="postgres://user:pass@localhost:5432/mydb?sslmode=disable" WORKERS=5 ./pgstorm
 ```
 
 ---
@@ -320,7 +320,7 @@ pgloadgen_pool_acquired_conns / pgloadgen_pool_max_conns
 
 ## Running Multiple Replicas
 
-pg-loadgen is safe to run as multiple replicas against the same database. Advisory lock migration ensures exactly one replica runs DDL at startup; the others wait passively until the schema is ready.
+pgstorm is safe to run as multiple replicas against the same database. Advisory lock migration ensures exactly one replica runs DDL at startup; the others wait passively until the schema is ready.
 
 To scale up in Docker Compose:
 

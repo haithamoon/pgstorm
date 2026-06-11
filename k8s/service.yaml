@@ -1,12 +1,12 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: pg-loadgen-metrics
+  name: pgstorm-metrics
   labels:
-    app: pg-loadgen
+    app: pgstorm
 spec:
   selector:
-    app: pg-loadgen
+    app: pgstorm
   ports:
     - name: metrics
       port: 9090

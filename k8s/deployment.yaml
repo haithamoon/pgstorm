@@ -1,52 +1,54 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: pg-loadgen-config
+  name: pgstorm-config
 data:
   WORKERS: "20"
   CREATE_INDEXES: "false"
   RING_SIZE: "10000"
   WRITE_PCT: "35"
-  READ_SIMPLE_PCT: "20"
+  READ_SIMPLE_PCT: "15"
   READ_JOIN_PCT: "20"
   UPDATE_PCT: "15"
   DELETE_PCT: "10"
+  READ_IP_PCT: "5"
   MIN_PAYLOAD_KB: "8"
   MAX_PAYLOAD_KB: "16"
   DELETE_BATCH_SIZE: "50"
-  DELETE_OLDER_THAN_MINS: "10"
   THINK_TIME_MS: "0"
   METRICS_PORT: "9090"
   RUN_DURATION_SECS: "0"
+  SUMMARY_INTERVAL_SECS: "30"
+  INDEX_STATS_INTERVAL_SECS: "30"
   LOG_LEVEL: "info"
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: pg-loadgen
+  name: pgstorm
   labels:
-    app: pg-loadgen
+    app: pgstorm
 spec:
   replicas: 3
   selector:
     matchLabels:
-      app: pg-loadgen
+      app: pgstorm
   template:
     metadata:
       labels:
-        app: pg-loadgen
+        app: pgstorm
     spec:
       containers:
-        - name: pg-loadgen
-          image: your-registry/pg-loadgen:latest
+        - name: pgstorm
+          image: your-registry/pgstorm:latest
           ports:
             - containerPort: 9090
               name: metrics
           envFrom:
             - configMapRef:
-                name: pg-loadgen-config
+                name: pgstorm-config
             - secretRef:
-                name: pg-loadgen-secret
+                name: pgstorm-secret
           livenessProbe:
             httpGet:
               path: /healthz
