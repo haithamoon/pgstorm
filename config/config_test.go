@@ -135,6 +135,55 @@ func TestLoad_minPayloadEqualToMax(t *testing.T) {
 	}
 }
 
+func TestLoad_negativePct(t *testing.T) {
+	// Negative individual percentage that still sums to 100 must be rejected.
+	t.Setenv("WRITE_PCT", "-10")
+	t.Setenv("READ_SIMPLE_PCT", "110")
+	t.Setenv("READ_JOIN_PCT", "0")
+	t.Setenv("UPDATE_PCT", "0")
+	t.Setenv("DELETE_PCT", "0")
+	t.Setenv("READ_IP_PCT", "0")
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected error for negative percentage, got nil")
+	}
+	if !strings.Contains(err.Error(), ">= 0") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+}
+
+func TestLoad_zeroWorkers(t *testing.T) {
+	t.Setenv("WORKERS", "0")
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected error for WORKERS=0")
+	}
+}
+
+func TestLoad_zeroRingSize(t *testing.T) {
+	t.Setenv("RING_SIZE", "0")
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected error for RING_SIZE=0")
+	}
+}
+
+func TestLoad_zeroSummaryInterval(t *testing.T) {
+	t.Setenv("SUMMARY_INTERVAL_SECS", "0")
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected error for SUMMARY_INTERVAL_SECS=0")
+	}
+}
+
+func TestLoad_zeroSchemaPollMs(t *testing.T) {
+	t.Setenv("SCHEMA_POLL_MS", "0")
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected error for SCHEMA_POLL_MS=0")
+	}
+}
+
 func TestGetEnvInt_invalidFallsToDefault(t *testing.T) {
 	t.Setenv("TEST_INT_KEY", "not-a-number")
 	got := getEnvInt("TEST_INT_KEY", 42)

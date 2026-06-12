@@ -39,9 +39,10 @@ func newWorkerStats() *WorkerStats {
 	return ws
 }
 
-// Record is called by the worker goroutine after every op — no lock needed
-// because only one goroutine writes to this WorkerStats.
+// Record is called by the worker goroutine after every op.
 func (ws *WorkerStats) Record(op string, durationSec float64, err error) {
+	ws.mu.Lock()
+	defer ws.mu.Unlock()
 	s := ws.data[op]
 	s.count++
 	if err != nil {

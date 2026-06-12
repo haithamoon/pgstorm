@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -20,7 +21,7 @@ import (
 	"pg-loadgen/workload"
 )
 
-var ready = false
+var ready atomic.Bool
 
 func main() {
 	// Load .env if present; existing env vars take priority over .env values.
@@ -62,7 +63,7 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 	})
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
-		if ready {
+		if ready.Load() {
 			w.WriteHeader(http.StatusOK)
 		} else {
 			w.WriteHeader(http.StatusServiceUnavailable)
@@ -79,7 +80,7 @@ func main() {
 		}
 	}()
 
-	ready = true
+	ready.Store(true)
 	log.Printf("starting %d workers", cfg.Workers)
 
 	ring := workload.NewSessionRing(cfg.RingSize)

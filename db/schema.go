@@ -88,19 +88,27 @@ func CreateTables(ctx context.Context, pool *pgxpool.Pool) error {
 }
 
 func CreateIndexes(ctx context.Context, pool *pgxpool.Pool) error {
-	_, err := pool.Exec(ctx, `
-		CREATE INDEX IF NOT EXISTS idx_sessions_user_id        ON sessions (user_id);
-		CREATE INDEX IF NOT EXISTS idx_sessions_status_created ON sessions (status, created_at DESC);
-
-		CREATE INDEX IF NOT EXISTS idx_events_session_id          ON events (session_id);
-		CREATE INDEX IF NOT EXISTS idx_events_occurred_at         ON events (occurred_at DESC);
-		CREATE INDEX IF NOT EXISTS idx_events_severity_occurred   ON events (severity, occurred_at DESC);
-		CREATE INDEX IF NOT EXISTS idx_events_source_ip           ON events (source_ip);
-
-		CREATE INDEX IF NOT EXISTS idx_audit_log_entity_id  ON audit_log (entity_id, changed_at DESC);
-		CREATE INDEX IF NOT EXISTS idx_audit_log_changed_at ON audit_log (changed_at DESC);
-	`)
-	return err
+	// Each index is created in its own statement. CONCURRENTLY avoids taking
+	// a ShareLock that would block DML on the table during the build, which
+	// matters when CREATE_INDEXES is enabled against a database that already
+	// has running load. CONCURRENTLY cannot run inside a transaction block,
+	// so the statements must not be batched.
+	indexes := []string{
+		`CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_sessions_user_id        ON sessions (user_id)`,
+		`CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_sessions_status_created ON sessions (status, created_at DESC)`,
+		`CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_events_session_id          ON events (session_id)`,
+		`CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_events_occurred_at         ON events (occurred_at DESC)`,
+		`CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_events_severity_occurred   ON events (severity, occurred_at DESC)`,
+		`CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_events_source_ip           ON events (source_ip)`,
+		`CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_audit_log_entity_id  ON audit_log (entity_id, changed_at DESC)`,
+		`CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_audit_log_changed_at ON audit_log (changed_at DESC)`,
+	}
+	for _, ddl := range indexes {
+		if _, err := pool.Exec(ctx, ddl); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // sentinelIndex is the last index created by CreateIndexes. Followers wait for

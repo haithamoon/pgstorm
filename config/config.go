@@ -62,6 +62,22 @@ func Load() (*Config, error) {
 		LogLevel:               getEnv("LOG_LEVEL", "info"),
 	}
 
+	for _, p := range []struct {
+		name string
+		val  int
+	}{
+		{"WRITE_PCT", cfg.WritePct},
+		{"READ_SIMPLE_PCT", cfg.ReadSimplePct},
+		{"READ_JOIN_PCT", cfg.ReadJoinPct},
+		{"UPDATE_PCT", cfg.UpdatePct},
+		{"DELETE_PCT", cfg.DeletePct},
+		{"READ_IP_PCT", cfg.ReadIPPct},
+	} {
+		if p.val < 0 {
+			return nil, fmt.Errorf("%s must be >= 0, got %d", p.name, p.val)
+		}
+	}
+
 	total := cfg.WritePct + cfg.ReadSimplePct + cfg.ReadJoinPct + cfg.UpdatePct + cfg.DeletePct + cfg.ReadIPPct
 	if total != 100 {
 		return nil, fmt.Errorf("operation percentages must sum to 100, got %d", total)
@@ -69,6 +85,25 @@ func Load() (*Config, error) {
 
 	if cfg.MinPayloadKB > cfg.MaxPayloadKB {
 		return nil, fmt.Errorf("MIN_PAYLOAD_KB (%d) must not exceed MAX_PAYLOAD_KB (%d)", cfg.MinPayloadKB, cfg.MaxPayloadKB)
+	}
+
+	for _, v := range []struct {
+		name string
+		val  int
+		min  int
+	}{
+		{"WORKERS", cfg.Workers, 1},
+		{"RING_SIZE", cfg.RingSize, 1},
+		{"DELETE_BATCH_SIZE", cfg.DeleteBatchSize, 1},
+		{"METRICS_PORT", cfg.MetricsPort, 1},
+		{"SUMMARY_INTERVAL_SECS", cfg.SummaryIntervalSecs, 1},
+		{"INDEX_STATS_INTERVAL_SECS", cfg.IndexStatsIntervalSecs, 1},
+		{"SCHEMA_POLL_MS", cfg.SchemaPollMs, 1},
+		{"SHUTDOWN_TIMEOUT_SECS", cfg.ShutdownTimeoutSecs, 1},
+	} {
+		if v.val < v.min {
+			return nil, fmt.Errorf("%s must be >= %d, got %d", v.name, v.min, v.val)
+		}
 	}
 
 	return cfg, nil
