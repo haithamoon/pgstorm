@@ -1,0 +1,7 @@
+apiVersion: 1
+
+providers:
+  - name: pg-loadgen
+    type: file
+    options:
+      path: /etc/grafana/provisioning/dashboards

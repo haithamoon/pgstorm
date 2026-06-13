@@ -18,7 +18,7 @@ services:
   loadgen:
     build: .
     deploy:
-      replicas: 1
+      replicas: 2
     environment:
       PG_DSN: postgres://loadgen:loadgen@postgres:5432/loadtest?sslmode=disable
       WORKERS: "2"
@@ -35,13 +35,52 @@ services:
       DELETE_BATCH_SIZE: "50"
       THINK_TIME_MS: "0"
       METRICS_PORT: "9090"
-      RUN_DURATION_SECS: "160"
+      RUN_DURATION_SECS: "900"
       SUMMARY_INTERVAL_SECS: "30"
       INDEX_STATS_INTERVAL_SECS: "30"
       LOG_LEVEL: "info"
-    ports:
-      - "${HOST_METRICS_PORT:-9090}:9090"
     depends_on:
       postgres:
         condition: service_healthy
+
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:v0.16.0
+    environment:
+      DATA_SOURCE_NAME: "postgresql://loadgen:loadgen@postgres:5432/loadtest?sslmode=disable"
+    ports:
+      - "9187:9187"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  prometheus:
+    image: prom/prometheus:v3.4.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --web.listen-address=:9091
+    ports:
+      - "9091:9091"
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    depends_on:
+      - loadgen
+
+  grafana:
+    image: grafana/grafana:12.0.1
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_INSTALL_PLUGINS: ""
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+
+volumes:
+  prometheus_data:
+  grafana_data:
 
