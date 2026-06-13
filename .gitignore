@@ -2,3 +2,4 @@ pgdata/
 pg-loadgen
 .env
 todo.txt
+gemini-feedback.md
