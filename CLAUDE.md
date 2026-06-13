@@ -13,22 +13,20 @@ A Go-based PostgreSQL load generator that stresses **heap I/O**, **Toast storage
 <!-- UPDATE THIS SECTION AT THE END OF EVERY SESSION -->
 
 **Last updated:** 2026-06-13
-**Active branch:** `add-monitoring`
+**Active branch:** `main`
 
 ### In progress
-- Wait Event analysis (`pgloadgen_wait_events_active`) just added to `metrics/pg_stats.go` — collecting from `pg_stat_activity` on the `INDEX_STATS_INTERVAL_SECS` tick
+- Nothing — all work from this session is committed and pushed to main
 
 ### Known open issues
 - `metrics/wait_events.go` is an empty stub (cannot delete files via tooling) — all wait event logic lives in `pg_stats.go`
-- `pg_stat_bgwriter` schema changed in PG17 — handled: `collectBgwriterStats` detects version and routes to `collectBgwriterStatsPG17` which queries `pg_stat_checkpointer`
 
 ### Recently completed
-- Prometheus + Grafana added to Docker Compose (`monitoring/` directory); dashboards auto-provisioned
-- `postgres_exporter` sidecar added for raw PG metrics; separate Grafana dashboard provisioned
-- Wait Event analysis: `pgloadgen_wait_events_active` GaugeVec (labels: `wait_event_type`, `wait_event`); polls `pg_stat_activity WHERE wait_event IS NOT NULL`; `Reset()` called each tick
-- `read_by_ip` op (B-tree range scan on `events.source_ip` within a /24 subnet) — 6th op; env var `READ_IP_PCT` (default 5%)
-- PG17 bgwriter support: `collectBgwriterStatsPG17` queries `pg_stat_checkpointer`
-- WAL and bgwriter metric collectors (`metrics/pg_stats.go`)
+- Prometheus + Grafana added to Docker Compose (`monitoring/` directory); dashboards auto-provisioned on startup
+- `postgres_exporter` (v0.16.0) sidecar added; separate PostgreSQL Grafana dashboard provisioned
+- Wait Event analysis: `pgloadgen_wait_events_active` GaugeVec in `metrics/pg_stats.go`; polls `pg_stat_activity WHERE wait_event IS NOT NULL`; `Reset()` each tick; shares `INDEX_STATS_INTERVAL_SECS` tick
+- Stop hook added to `.claude/settings.json` — reminds to update CLAUDE.md when uncommitted changes exist
+- Loadgen scaled to 2 replicas × 2 workers; host port mapping removed; Prometheus scrapes both containers by Docker internal DNS name
 
 ---
 
