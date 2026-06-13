@@ -51,6 +51,13 @@ var (
 		Help:      "Total time spent syncing files to disk during checkpoints, in seconds.",
 	})
 
+	// Wait event metrics — snapshot of pg_stat_activity, not cumulative.
+	waitEventsActive = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: namespace,
+		Name:      "wait_events_active",
+		Help:      "Number of sessions currently waiting on a specific PostgreSQL wait event (snapshot, not cumulative).",
+	}, []string{"wait_event_type", "wait_event"})
+
 	// WAL metrics — from pg_stat_wal (requires PG14+).
 	walBytesTotal = prometheus.NewCounter(prometheus.CounterOpts{
 		Namespace: namespace,
@@ -76,6 +83,7 @@ var (
 
 func RegisterPGStats() {
 	prometheus.MustRegister(
+		waitEventsActive,
 		bgwriterCheckpointsTimed,
 		bgwriterCheckpointsReq,
 		bgwriterBuffersCheckpoint,
@@ -112,6 +120,9 @@ func RunPGStatsLoop(ctx context.Context, pool *pgxpool.Pool, interval time.Durat
 			}
 			if err := collectWALStats(ctx, pool, tracker); err != nil && ctx.Err() == nil {
 				log.Printf("WAL stats error: %v", err)
+			}
+			if err := collectWaitEventStats(ctx, pool); err != nil && ctx.Err() == nil {
+				log.Printf("wait event stats error: %v", err)
 			}
 		}
 	}
@@ -209,6 +220,30 @@ func collectBgwriterStatsPG17(ctx context.Context, pool *pgxpool.Pool, tracker *
 	bgwriterBuffersClean.Add(tracker.delta("buf_clean", bufClean))
 
 	return nil
+}
+
+func collectWaitEventStats(ctx context.Context, pool *pgxpool.Pool) error {
+	rows, err := pool.Query(ctx, `
+		SELECT wait_event_type, wait_event, count(*)::float8
+		FROM pg_stat_activity
+		WHERE wait_event IS NOT NULL
+		GROUP BY 1, 2
+	`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	waitEventsActive.Reset()
+	for rows.Next() {
+		var evType, ev string
+		var count float64
+		if err := rows.Scan(&evType, &ev, &count); err != nil {
+			return err
+		}
+		waitEventsActive.WithLabelValues(evType, ev).Set(count)
+	}
+	return rows.Err()
 }
 
 func collectWALStats(ctx context.Context, pool *pgxpool.Pool, tracker *pgStatsTracker) error {
