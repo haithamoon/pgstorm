@@ -48,11 +48,9 @@ func RunWorker(ctx context.Context, pool *pgxpool.Pool, ring *SessionRing, cfg *
 		roll := rng.Intn(100)
 		op := SelectOp(roll, cfg)
 
-		metrics.WorkersActive.Inc()
 		start := time.Now()
-		err := exec.Execute(ctx, op)
+		err := runOp(ctx, exec, op)
 		duration := time.Since(start).Seconds()
-		metrics.WorkersActive.Dec()
 
 		metrics.RecordOp(op, duration, err)
 		ws.Record(op, duration, err)
@@ -69,4 +67,16 @@ func RunWorker(ctx context.Context, pool *pgxpool.Pool, ring *SessionRing, cfg *
 			}
 		}
 	}
+}
+
+// runOp executes a single operation while accounting for it in the WorkersActive
+// gauge. The deferred Dec keeps the gauge balanced on every return path, including
+// a panic — the previous inline Dec was skipped if the op panicked. Panics are
+// deliberately NOT recovered: a bug that panics should fail loudly and take the
+// process down rather than be silently masked as per-op error noise while /readyz
+// stays green and the load test quietly produces meaningless results.
+func runOp(ctx context.Context, exec *Executor, op string) error {
+	metrics.WorkersActive.Inc()
+	defer metrics.WorkersActive.Dec()
+	return exec.Execute(ctx, op)
 }
