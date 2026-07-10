@@ -21,8 +21,8 @@ func TestLoad_defaultsAreValid(t *testing.T) {
 	if cfg.Workers != 20 {
 		t.Errorf("Workers: want 20, got %d", cfg.Workers)
 	}
-	if cfg.WritePct != 35 {
-		t.Errorf("WritePct: want 35, got %d", cfg.WritePct)
+	if cfg.Profile != "oltp-jsonb" {
+		t.Errorf("Profile: want oltp-jsonb, got %q", cfg.Profile)
 	}
 	if cfg.RingSize != 10000 {
 		t.Errorf("RingSize: want 10000, got %d", cfg.RingSize)
@@ -35,74 +35,7 @@ func TestLoad_defaultsAreValid(t *testing.T) {
 	}
 }
 
-func TestLoad_pctsMustSum100(t *testing.T) {
-	tests := []struct {
-		name string
-		pcts map[string]string
-	}{
-		{
-			name: "total 99",
-			pcts: map[string]string{
-				"WRITE_PCT": "34", "READ_SIMPLE_PCT": "15", "READ_JOIN_PCT": "20",
-				"UPDATE_PCT": "15", "DELETE_PCT": "10", "READ_IP_PCT": "5",
-			},
-		},
-		{
-			name: "total 101",
-			pcts: map[string]string{
-				"WRITE_PCT": "36", "READ_SIMPLE_PCT": "15", "READ_JOIN_PCT": "20",
-				"UPDATE_PCT": "15", "DELETE_PCT": "10", "READ_IP_PCT": "5",
-			},
-		},
-		{
-			name: "all zero",
-			pcts: map[string]string{
-				"WRITE_PCT": "0", "READ_SIMPLE_PCT": "0", "READ_JOIN_PCT": "0",
-				"UPDATE_PCT": "0", "DELETE_PCT": "0", "READ_IP_PCT": "0",
-			},
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			for k, v := range tc.pcts {
-				t.Setenv(k, v)
-			}
-			_, err := Load()
-			if err == nil {
-				t.Fatal("expected error, got nil")
-			}
-			if !strings.Contains(err.Error(), "percentages must sum to 100") {
-				t.Errorf("unexpected error message: %v", err)
-			}
-		})
-	}
-}
-
-func TestLoad_singleOp100Pct(t *testing.T) {
-	t.Setenv("WRITE_PCT", "100")
-	t.Setenv("READ_SIMPLE_PCT", "0")
-	t.Setenv("READ_JOIN_PCT", "0")
-	t.Setenv("UPDATE_PCT", "0")
-	t.Setenv("DELETE_PCT", "0")
-	t.Setenv("READ_IP_PCT", "0")
-	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("expected no error, got: %v", err)
-	}
-	if cfg.WritePct != 100 {
-		t.Errorf("WritePct: want 100, got %d", cfg.WritePct)
-	}
-}
-
 func TestLoad_minPayloadExceedsMax(t *testing.T) {
-	// Reset pcts to valid defaults.
-	t.Setenv("WRITE_PCT", "35")
-	t.Setenv("READ_SIMPLE_PCT", "15")
-	t.Setenv("READ_JOIN_PCT", "20")
-	t.Setenv("UPDATE_PCT", "15")
-	t.Setenv("DELETE_PCT", "10")
-	t.Setenv("READ_IP_PCT", "5")
-
 	t.Setenv("MIN_PAYLOAD_KB", "16")
 	t.Setenv("MAX_PAYLOAD_KB", "8")
 
@@ -117,12 +50,6 @@ func TestLoad_minPayloadExceedsMax(t *testing.T) {
 
 func TestLoad_minPayloadEqualToMax(t *testing.T) {
 	// MIN == MAX is valid: buildTemplate calls rng.Intn(1) which returns 0 safely.
-	t.Setenv("WRITE_PCT", "35")
-	t.Setenv("READ_SIMPLE_PCT", "15")
-	t.Setenv("READ_JOIN_PCT", "20")
-	t.Setenv("UPDATE_PCT", "15")
-	t.Setenv("DELETE_PCT", "10")
-	t.Setenv("READ_IP_PCT", "5")
 	t.Setenv("MIN_PAYLOAD_KB", "8")
 	t.Setenv("MAX_PAYLOAD_KB", "8")
 
@@ -132,23 +59,6 @@ func TestLoad_minPayloadEqualToMax(t *testing.T) {
 	}
 	if cfg.MinPayloadKB != 8 || cfg.MaxPayloadKB != 8 {
 		t.Errorf("expected both payload KBs to be 8")
-	}
-}
-
-func TestLoad_negativePct(t *testing.T) {
-	// Negative individual percentage that still sums to 100 must be rejected.
-	t.Setenv("WRITE_PCT", "-10")
-	t.Setenv("READ_SIMPLE_PCT", "110")
-	t.Setenv("READ_JOIN_PCT", "0")
-	t.Setenv("UPDATE_PCT", "0")
-	t.Setenv("DELETE_PCT", "0")
-	t.Setenv("READ_IP_PCT", "0")
-	_, err := Load()
-	if err == nil {
-		t.Fatal("expected error for negative percentage, got nil")
-	}
-	if !strings.Contains(err.Error(), ">= 0") {
-		t.Errorf("unexpected error message: %v", err)
 	}
 }
 

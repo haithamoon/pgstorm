@@ -12,7 +12,23 @@ import (
 
 const advisoryLockID = 7654321
 
-func MigrateWithLock(ctx context.Context, pool *pgxpool.Pool, cfg *config.Config) error {
+// Schema is the DDL a workload profile needs plus the relnames to track for
+// stats. The migration runner executes Tables (always) and Indexes (only when
+// CREATE_INDEXES=true) under an advisory lock so exactly one replica runs DDL;
+// the others wait via WaitForSchema.
+type Schema struct {
+	Tables  []string // CREATE TABLE IF NOT EXISTS ... (one statement each)
+	Indexes []string // CREATE INDEX CONCURRENTLY IF NOT EXISTS ...
+	// TrackedTables lists the profile's table relnames. It serves two roles: the
+	// tables reported in table/index stats, AND the follower schema-readiness set —
+	// WaitForSchema polls until every TrackedTable exists before workers start. A
+	// profile MUST therefore list every table its workers depend on; omitting one
+	// (or leaving this empty) would let followers start before that table is created.
+	TrackedTables []string
+	SentinelIndex string // last index followers wait for; "" = no index wait
+}
+
+func MigrateWithLock(ctx context.Context, pool *pgxpool.Pool, cfg *config.Config, schema Schema) error {
 	conn, err := pool.Acquire(ctx)
 	if err != nil {
 		return fmt.Errorf("acquire connection for migration: %w", err)
@@ -28,11 +44,11 @@ func MigrateWithLock(ctx context.Context, pool *pgxpool.Pool, cfg *config.Config
 		defer conn.Exec(ctx, "SELECT pg_advisory_unlock($1)", advisoryLockID) //nolint
 		log.Println("acquired migration lock — running schema setup")
 
-		if err := CreateTables(ctx, pool); err != nil {
+		if err := CreateTables(ctx, pool, schema); err != nil {
 			return fmt.Errorf("create tables: %w", err)
 		}
 		if cfg.CreateIndexes {
-			if err := CreateIndexes(ctx, pool); err != nil {
+			if err := CreateIndexes(ctx, pool, schema); err != nil {
 				return fmt.Errorf("create indexes: %w", err)
 			}
 		}
@@ -40,7 +56,7 @@ func MigrateWithLock(ctx context.Context, pool *pgxpool.Pool, cfg *config.Config
 	} else {
 		log.Println("migration lock held by another pod — waiting for schema")
 		pollInterval := time.Duration(cfg.SchemaPollMs) * time.Millisecond
-		if err := WaitForSchema(ctx, pool, cfg.CreateIndexes, pollInterval); err != nil {
+		if err := WaitForSchema(ctx, pool, schema, cfg.CreateIndexes, pollInterval); err != nil {
 			return fmt.Errorf("wait for schema: %w", err)
 		}
 		log.Println("schema ready — proceeding")
@@ -48,62 +64,10 @@ func MigrateWithLock(ctx context.Context, pool *pgxpool.Pool, cfg *config.Config
 	return nil
 }
 
-func CreateTables(ctx context.Context, pool *pgxpool.Pool) error {
-	_, err := pool.Exec(ctx, `
-		CREATE TABLE IF NOT EXISTS sessions (
-			id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-			user_id     UUID NOT NULL,
-			started_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
-			ended_at    TIMESTAMPTZ,
-			region      TEXT NOT NULL,
-			metadata    JSONB NOT NULL,
-			status      TEXT NOT NULL DEFAULT 'active',
-			created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
-		);
-
-		CREATE TABLE IF NOT EXISTS events (
-			id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-			session_id    UUID NOT NULL REFERENCES sessions(id),
-			event_type    TEXT NOT NULL,
-			occurred_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-			payload       JSONB NOT NULL,
-			severity      TEXT NOT NULL DEFAULT 'info',
-			trace_id      TEXT NOT NULL,
-			source_ip     INET,
-			created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
-		);
-
-		CREATE TABLE IF NOT EXISTS audit_log (
-			id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-			entity_type   TEXT NOT NULL,
-			entity_id     UUID NOT NULL,
-			action        TEXT NOT NULL,
-			changed_by    UUID NOT NULL,
-			changed_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-			diff          JSONB NOT NULL,
-			checksum      TEXT NOT NULL
-		);
-	`)
-	return err
-}
-
-func CreateIndexes(ctx context.Context, pool *pgxpool.Pool) error {
-	// Each index is created in its own statement. CONCURRENTLY avoids taking
-	// a ShareLock that would block DML on the table during the build, which
-	// matters when CREATE_INDEXES is enabled against a database that already
-	// has running load. CONCURRENTLY cannot run inside a transaction block,
-	// so the statements must not be batched.
-	indexes := []string{
-		`CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_sessions_user_id        ON sessions (user_id)`,
-		`CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_sessions_status_created ON sessions (status, created_at DESC)`,
-		`CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_events_session_id          ON events (session_id)`,
-		`CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_events_occurred_at         ON events (occurred_at DESC)`,
-		`CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_events_severity_occurred   ON events (severity, occurred_at DESC)`,
-		`CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_events_source_ip           ON events (source_ip)`,
-		`CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_audit_log_entity_id  ON audit_log (entity_id, changed_at DESC)`,
-		`CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_audit_log_changed_at ON audit_log (changed_at DESC)`,
-	}
-	for _, ddl := range indexes {
+// CreateTables runs each of the schema's table DDL statements in sequence. Each
+// is CREATE TABLE IF NOT EXISTS, so it is idempotent and safe to re-run.
+func CreateTables(ctx context.Context, pool *pgxpool.Pool, schema Schema) error {
+	for _, ddl := range schema.Tables {
 		if _, err := pool.Exec(ctx, ddl); err != nil {
 			return err
 		}
@@ -111,24 +75,33 @@ func CreateIndexes(ctx context.Context, pool *pgxpool.Pool) error {
 	return nil
 }
 
-// sentinelIndex is the last index created by CreateIndexes. Followers wait for
-// it when CREATE_INDEXES=true so they don't start workers while CREATE INDEX
-// still holds ShareLock on the tables (which would block DML).
-const sentinelIndex = "idx_audit_log_changed_at"
+// CreateIndexes runs each index DDL in its own statement. Indexes are expected to
+// use CREATE INDEX CONCURRENTLY, which avoids a ShareLock that would block DML on
+// a table already under load — and which cannot run inside a transaction block,
+// so the statements must not be batched.
+func CreateIndexes(ctx context.Context, pool *pgxpool.Pool, schema Schema) error {
+	for _, ddl := range schema.Indexes {
+		if _, err := pool.Exec(ctx, ddl); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
-func WaitForSchema(ctx context.Context, pool *pgxpool.Pool, waitIndexes bool, pollInterval time.Duration) error {
-	required := []string{"sessions", "events", "audit_log"}
+func WaitForSchema(ctx context.Context, pool *pgxpool.Pool, schema Schema, waitIndexes bool, pollInterval time.Duration) error {
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-time.After(pollInterval):
-			missing := checkMissingTables(ctx, pool, required)
+			missing := checkMissingTables(ctx, pool, schema.TrackedTables)
 			if len(missing) > 0 {
 				log.Printf("waiting for tables: %v", missing)
 				continue
 			}
-			if waitIndexes && !indexExists(ctx, pool, sentinelIndex) {
+			// Wait for the sentinel index too, so followers don't start workers
+			// while CREATE INDEX still holds locks on the tables.
+			if waitIndexes && schema.SentinelIndex != "" && !indexExists(ctx, pool, schema.SentinelIndex) {
 				log.Printf("waiting for indexes (CREATE_INDEXES=true)")
 				continue
 			}

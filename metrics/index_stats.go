@@ -74,7 +74,7 @@ func RegisterIndexStats() {
 
 // RunTableStatsLoop always runs — polls pg_stat_user_tables for MVCC metrics
 // regardless of whether indexes are enabled. Cancels when ctx is done.
-func RunTableStatsLoop(ctx context.Context, pool *pgxpool.Pool, interval time.Duration) {
+func RunTableStatsLoop(ctx context.Context, pool *pgxpool.Pool, interval time.Duration, tables []string) {
 	tracker := newIndexScanTracker() // reuse same delta-tracker type for autovacuum/autoanalyze counts
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -83,7 +83,7 @@ func RunTableStatsLoop(ctx context.Context, pool *pgxpool.Pool, interval time.Du
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := collectTableStats(ctx, pool, tracker); err != nil && ctx.Err() == nil {
+			if err := collectTableStats(ctx, pool, tracker, tables); err != nil && ctx.Err() == nil {
 				log.Printf("table stats collection error: %v", err)
 			}
 		}
@@ -116,7 +116,7 @@ func (t *indexScanTracker) delta(key string, current int64) int64 {
 
 // RunIndexStatsLoop polls pg_stat_user_indexes for index sizes and scan counts.
 // Only start this when CREATE_INDEXES=true. Cancels when ctx is done.
-func RunIndexStatsLoop(ctx context.Context, pool *pgxpool.Pool, interval time.Duration) {
+func RunIndexStatsLoop(ctx context.Context, pool *pgxpool.Pool, interval time.Duration, tables []string) {
 	tracker := newIndexScanTracker()
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -125,14 +125,14 @@ func RunIndexStatsLoop(ctx context.Context, pool *pgxpool.Pool, interval time.Du
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := collectIndexStats(ctx, pool, tracker); err != nil && ctx.Err() == nil {
+			if err := collectIndexStats(ctx, pool, tracker, tables); err != nil && ctx.Err() == nil {
 				log.Printf("index stats collection error: %v", err)
 			}
 		}
 	}
 }
 
-func collectTableStats(ctx context.Context, pool *pgxpool.Pool, tracker *indexScanTracker) error {
+func collectTableStats(ctx context.Context, pool *pgxpool.Pool, tracker *indexScanTracker, tables []string) error {
 	rows, err := pool.Query(ctx, `
 		SELECT
 			relname,
@@ -144,8 +144,8 @@ func collectTableStats(ctx context.Context, pool *pgxpool.Pool, tracker *indexSc
 			autoanalyze_count
 		FROM pg_stat_user_tables
 		WHERE schemaname = 'public'
-		  AND relname IN ('sessions', 'events', 'audit_log')
-	`)
+		  AND relname = ANY($1)
+	`, tables)
 	if err != nil {
 		return err
 	}
@@ -171,7 +171,7 @@ func collectTableStats(ctx context.Context, pool *pgxpool.Pool, tracker *indexSc
 	return rows.Err()
 }
 
-func collectIndexStats(ctx context.Context, pool *pgxpool.Pool, tracker *indexScanTracker) error {
+func collectIndexStats(ctx context.Context, pool *pgxpool.Pool, tracker *indexScanTracker, tables []string) error {
 	rows, err := pool.Query(ctx, `
 		SELECT
 			ui.indexrelname,
@@ -180,8 +180,8 @@ func collectIndexStats(ctx context.Context, pool *pgxpool.Pool, tracker *indexSc
 			ui.idx_scan
 		FROM pg_stat_user_indexes ui
 		WHERE ui.schemaname = 'public'
-		  AND ui.relname IN ('sessions', 'events', 'audit_log')
-	`)
+		  AND ui.relname = ANY($1)
+	`, tables)
 	if err != nil {
 		return err
 	}

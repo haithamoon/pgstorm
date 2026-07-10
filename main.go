@@ -12,9 +12,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/joho/godotenv"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"github.com/joho/godotenv"
 	"pg-loadgen/config"
 	"pg-loadgen/db"
 	"pg-loadgen/metrics"
@@ -34,7 +34,15 @@ func main() {
 		log.Fatalf("load config: %v", err)
 	}
 
-	workload.InitEventPool(cfg.MinPayloadKB, cfg.MaxPayloadKB)
+	profile, err := workload.GetProfile(cfg.Profile)
+	if err != nil {
+		log.Fatalf("select profile: %v", err)
+	}
+	ops, err := workload.ResolveWeights(profile.Ops())
+	if err != nil {
+		log.Fatalf("resolve op weights: %v", err)
+	}
+	log.Printf("workload profile: %s", profile.Name())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -45,8 +53,14 @@ func main() {
 	}
 	defer pool.Close()
 
-	if err := db.MigrateWithLock(ctx, pool, cfg); err != nil {
+	if err := db.MigrateWithLock(ctx, pool, cfg, profile.Schema()); err != nil {
 		log.Fatalf("migrate: %v", err)
+	}
+
+	// Build the profile's shared state (pools, rings, payload templates) after the
+	// schema exists and before any worker starts.
+	if err := profile.Init(cfg, pool); err != nil {
+		log.Fatalf("init profile: %v", err)
 	}
 
 	metrics.Register()
@@ -82,8 +96,7 @@ func main() {
 
 	log.Printf("starting %d workers", cfg.Workers)
 
-	ring := workload.NewSessionRing(cfg.RingSize)
-	collector := workload.NewStatsCollector()
+	collector := workload.NewStatsCollector(workload.OpNames(ops))
 
 	var runCtx context.Context
 	var runCancel context.CancelFunc
@@ -98,10 +111,11 @@ func main() {
 	go collector.RunSummaryLoop(runCtx, summaryInterval, pool)
 
 	indexStatsInterval := time.Duration(cfg.IndexStatsIntervalSecs) * time.Second
-	go metrics.RunTableStatsLoop(runCtx, pool, indexStatsInterval)
+	trackedTables := profile.Schema().TrackedTables
+	go metrics.RunTableStatsLoop(runCtx, pool, indexStatsInterval, trackedTables)
 	go metrics.RunPGStatsLoop(runCtx, pool, indexStatsInterval)
 	if cfg.CreateIndexes {
-		go metrics.RunIndexStatsLoop(runCtx, pool, indexStatsInterval)
+		go metrics.RunIndexStatsLoop(runCtx, pool, indexStatsInterval, trackedTables)
 	}
 
 	var wg sync.WaitGroup
@@ -110,7 +124,7 @@ func main() {
 		ws := collector.NewWorkerStats()
 		go func(id int, ws *workload.WorkerStats) {
 			defer wg.Done()
-			workload.RunWorker(runCtx, pool, ring, cfg, id, ws)
+			workload.RunWorker(runCtx, profile, ops, cfg, id, ws)
 		}(i, ws)
 	}
 

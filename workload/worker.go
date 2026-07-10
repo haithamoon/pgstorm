@@ -6,36 +6,17 @@ import (
 	"math/rand"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	"pg-loadgen/config"
 	"pg-loadgen/metrics"
 )
 
-func SelectOp(roll int, cfg *config.Config) string {
-	cumulative := 0
-	ops := []struct {
-		name string
-		pct  int
-	}{
-		{OpInsert, cfg.WritePct},
-		{OpReadSimple, cfg.ReadSimplePct},
-		{OpReadJoin, cfg.ReadJoinPct},
-		{OpUpdate, cfg.UpdatePct},
-		{OpDelete, cfg.DeletePct},
-		{OpReadByIP, cfg.ReadIPPct},
-	}
-	for _, o := range ops {
-		cumulative += o.pct
-		if roll < cumulative {
-			return o.name
-		}
-	}
-	return OpInsert
-}
-
-func RunWorker(ctx context.Context, pool *pgxpool.Pool, ring *SessionRing, cfg *config.Config, id int, ws *WorkerStats) {
+// RunWorker runs one worker goroutine: build a per-worker executor from the
+// profile, then loop — pick an op by weight, execute it, record latency/outcome —
+// until the context is cancelled. The op set and weights are profile-defined and
+// resolved once by the caller.
+func RunWorker(ctx context.Context, profile Profile, ops []WeightedOp, cfg *config.Config, id int, ws *WorkerStats) {
 	rng := rand.New(rand.NewSource(time.Now().UnixNano() + int64(id)))
-	exec := NewExecutor(pool, ring, cfg, rng)
+	exec := profile.NewExecutor(rng)
 	thinkTime := time.Duration(cfg.ThinkTimeMs) * time.Millisecond
 
 	for {
@@ -46,7 +27,7 @@ func RunWorker(ctx context.Context, pool *pgxpool.Pool, ring *SessionRing, cfg *
 		}
 
 		roll := rng.Intn(100)
-		op := SelectOp(roll, cfg)
+		op := SelectOp(roll, ops)
 
 		start := time.Now()
 		err := runOp(ctx, exec, op)
@@ -71,11 +52,11 @@ func RunWorker(ctx context.Context, pool *pgxpool.Pool, ring *SessionRing, cfg *
 
 // runOp executes a single operation while accounting for it in the WorkersActive
 // gauge. The deferred Dec keeps the gauge balanced on every return path, including
-// a panic — the previous inline Dec was skipped if the op panicked. Panics are
-// deliberately NOT recovered: a bug that panics should fail loudly and take the
-// process down rather than be silently masked as per-op error noise while /readyz
-// stays green and the load test quietly produces meaningless results.
-func runOp(ctx context.Context, exec *Executor, op string) error {
+// a panic. Panics are deliberately NOT recovered: a bug that panics should fail
+// loudly and take the process down rather than be silently masked as per-op error
+// noise while /readyz stays green and the load test quietly produces meaningless
+// results.
+func runOp(ctx context.Context, exec Executor, op string) error {
 	metrics.WorkersActive.Inc()
 	defer metrics.WorkersActive.Dec()
 	return exec.Execute(ctx, op)

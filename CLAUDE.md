@@ -16,12 +16,13 @@ A Go-based PostgreSQL load generator that stresses **heap I/O**, **Toast storage
 **Active branch:** `main`
 
 ### In progress
-- **P0 + P1 done.** **P2:** the three small items are done (real percentiles, opt-in `READ_PAYLOAD` TOAST reads, deleted `wait_events.go` stub). The three larger P2 items are **parked for discussion**: raise payload cardinality, target-rate/closed-loop mode, and pluggable schema/workload (the last is the prereq for the **P3** roadmap — `pgvector` and message-queue benchmark profiles). See `CODE-REVIEW.md` (git-ignored).
+- **P0 + P1 done. P2:** small items done (real percentiles, opt-in `READ_PAYLOAD`, deleted `wait_events.go` stub); **pluggable workload profiles landed** (Phases 1+2 — see `docs/rfc-workload-profiles.md`). Still parked: raise payload cardinality, target-rate/closed-loop mode. **P3** next (blocked only by profile #2 design): `pgvector` and message-queue benchmark profiles. Backlog detail in `CODE-REVIEW.md` (git-ignored).
 
 ### Known open issues
 - None currently. (The old empty `metrics/wait_events.go` stub was deleted; wait-event logic lives in `pg_stats.go`.)
 
 ### Recently completed
+- **Pluggable workload profiles (2026-07-10):** refactored the fixed schema + 6-op workload into a `Profile` interface + registry; current workload is the default `oltp-jsonb` profile, selected via `PROFILE`. Op weights now resolve generically (`workload.ResolveWeights`, sum==100); `db/schema.go` runs a profile's `db.Schema` DDL; table/index stat loops are parameterized by tracked tables. Behavior-preserving (unit tests green, live-PG e2e created 3 tables + 11 indexes with the correct op mix). As-built simplifications and the eventual `workload/profiles/` layout are documented in `docs/rfc-workload-profiles.md`.
 - **P2 small items (2026-07-10, `b9e62c9`):** `percentile()` now interpolates within the histogram bucket (Prometheus-style) instead of snapping to the upper bound; opt-in `READ_PAYLOAD` makes `read_simple`/`read_by_ip` detoast+read `events.payload` (query variants precomputed as constants); deleted the empty `metrics/wait_events.go` stub.
 - **P1 review fixes (2026-07-10):** removed dead `LOG_LEVEL` config (`5f20e69`); corrected the false "Toast deduplication" rationale in CLAUDE.md (`1c55240`); moved `ready.Store(true)` to after workers spawn so `/readyz` is honest (`a089d43`); balanced the `WorkersActive` gauge via `defer Dec()` in a new `runOp()` helper — deliberately no `recover()`, since a review confirmed it would mask systematic panics (`a089d43`); corrected the "no mutex on hot path" note (`b78939a`).
 - **P0 review fixes (2026-07-10):**
@@ -40,16 +41,19 @@ A Go-based PostgreSQL load generator that stresses **heap I/O**, **Toast storage
 
 ```
 pgstorm/
-├── main.go                   — wires everything; signal handling; graceful shutdown
-├── config/config.go          — all env-var config; single Config struct; sum validation
+├── main.go                   — selects profile, resolves weights, wires everything; graceful shutdown
+├── config/config.go          — generic env-var config (op weights validated in workload.ResolveWeights)
 ├── db/
 │   ├── pool.go               — pgxpool setup (MaxConns = Workers+5)
-│   └── schema.go             — advisory-lock DDL; CREATE TABLE/INDEX IF NOT EXISTS
+│   └── schema.go             — generic advisory-lock migration runner; executes a profile's db.Schema
 ├── workload/
+│   ├── profile.go            — Profile/Executor/OpDef interfaces + profile registry
+│   ├── weights.go            — ResolveWeights (env→weights, sum==100) + weighted SelectOp
+│   ├── oltp.go               — OLTPProfile (default "oltp-jsonb"); owns the sessions/events/audit_log db.Schema
 │   ├── ring.go               — shared circular buffer of recently inserted session UUIDs
 │   ├── payload.go            — two template pools (100 each); micro-mutation engine
-│   ├── ops.go                — all 6 DB operations (Executor struct)
-│   ├── worker.go             — RunWorker goroutine; per-worker *rand.Rand
+│   ├── ops.go                — oltp-jsonb's 6 DB operations (oltpExecutor)
+│   ├── worker.go             — RunWorker goroutine (drives a Profile); per-worker *rand.Rand
 │   └── stats.go              — per-worker stats; 30s rolling summary; fixed-bucket histograms
 └── metrics/
     ├── metrics.go            — OpsTotal (Counter), OpDuration (Histogram), WorkersActive (Gauge)
@@ -61,6 +65,9 @@ pgstorm/
 ---
 
 ## Key design decisions
+
+### Workload profiles
+A **profile** (`workload.Profile`) owns a schema (`db.Schema`), an op set with env-var-driven default weights (`OpDef`), and a per-worker `Executor` factory. Profiles register themselves via `init()` into a package registry; `main` selects one by the `PROFILE` env var (default `oltp-jsonb`) and resolves op weights with `workload.ResolveWeights` (validates sum==100). The runner (`worker.go`, `stats.go`), migration (`db/schema.go`), and table/index stat loops are all profile-agnostic. **As-built simplifications** (see `docs/rfc-workload-profiles.md`): the interface, registry, and the single `oltp-jsonb` profile currently live in the `workload` package (no `workload/profiles/` subpackage yet — that move happens when profile #2 lands); only op weights moved to the resolver, other profile knobs stay in flat `config.Config`.
 
 ### Payload pools
 `workload/payload.go` has **two** template pools, not one:
@@ -170,6 +177,7 @@ PG_DSN="postgres://user:pass@localhost:5432/mydb?sslmode=disable" WORKERS=5 ./pg
 ### Other key variables
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `PROFILE` | oltp-jsonb | Workload profile to run (registry in `workload/profile.go`) |
 | `WORKERS` | 20 | Concurrent worker goroutines per replica |
 | `MIN_PAYLOAD_KB` | 8 | Min `events.payload` size |
 | `MAX_PAYLOAD_KB` | 16 | Max `events.payload` size |

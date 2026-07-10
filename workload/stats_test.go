@@ -7,23 +7,26 @@ import (
 	"time"
 )
 
+// testOps is the op set used across the stats tests (the oltp-jsonb ops).
+var testOps = []string{OpInsert, OpReadSimple, OpReadJoin, OpUpdate, OpDelete, OpReadByIP}
+
 // ── WorkerStats.Record ───────────────────────────────────────────────────────
 
 func TestRecord_bucketPlacement(t *testing.T) {
 	// bucketBounds (ms): [1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500]
 	tests := []struct {
-		durSec  float64
-		bucket  int // expected bucket index; -1 means inf
+		durSec float64
+		bucket int // expected bucket index; -1 means inf
 	}{
-		{0.0005, 0},  // 0.5 ms → ≤ 1 ms → bucket 0
-		{0.001, 0},   // 1.0 ms → ≤ 1 ms → bucket 0
-		{0.003, 1},   // 3 ms   → ≤ 5 ms → bucket 1
-		{0.050, 4},   // 50 ms  → ≤ 50 ms → bucket 4
-		{0.100, 5},   // 100 ms → ≤ 100 ms → bucket 5
-		{10.0, -1},   // 10 s   → inf
+		{0.0005, 0}, // 0.5 ms → ≤ 1 ms → bucket 0
+		{0.001, 0},  // 1.0 ms → ≤ 1 ms → bucket 0
+		{0.003, 1},  // 3 ms   → ≤ 5 ms → bucket 1
+		{0.050, 4},  // 50 ms  → ≤ 50 ms → bucket 4
+		{0.100, 5},  // 100 ms → ≤ 100 ms → bucket 5
+		{10.0, -1},  // 10 s   → inf
 	}
 	for _, tc := range tests {
-		ws := newWorkerStats()
+		ws := newWorkerStats(testOps)
 		ws.Record(OpInsert, tc.durSec, nil)
 		s := ws.data[OpInsert]
 		if tc.bucket == -1 {
@@ -39,7 +42,7 @@ func TestRecord_bucketPlacement(t *testing.T) {
 }
 
 func TestRecord_errorIncrements(t *testing.T) {
-	ws := newWorkerStats()
+	ws := newWorkerStats(testOps)
 	ws.Record(OpInsert, 0.001, nil)
 	ws.Record(OpInsert, 0.001, fmt.Errorf("oops"))
 	s := ws.data[OpInsert]
@@ -52,11 +55,11 @@ func TestRecord_errorIncrements(t *testing.T) {
 }
 
 func TestRecord_allOpsTracked(t *testing.T) {
-	ws := newWorkerStats()
-	for _, op := range allOps {
+	ws := newWorkerStats(testOps)
+	for _, op := range testOps {
 		ws.Record(op, 0.001, nil)
 	}
-	for _, op := range allOps {
+	for _, op := range testOps {
 		if ws.data[op].count != 1 {
 			t.Errorf("op=%s: count should be 1, got %d", op, ws.data[op].count)
 		}
@@ -66,7 +69,7 @@ func TestRecord_allOpsTracked(t *testing.T) {
 // ── WorkerStats.snapshot ─────────────────────────────────────────────────────
 
 func TestSnapshot_returnsDataAndResets(t *testing.T) {
-	ws := newWorkerStats()
+	ws := newWorkerStats(testOps)
 	ws.Record(OpInsert, 0.001, nil)
 	ws.Record(OpInsert, 0.050, nil)
 	ws.Record(OpDelete, 0.100, fmt.Errorf("e"))
@@ -81,7 +84,7 @@ func TestSnapshot_returnsDataAndResets(t *testing.T) {
 
 	// Second snapshot must return zeros — data was reset.
 	snap2 := ws.snapshot()
-	for _, op := range allOps {
+	for _, op := range testOps {
 		s := snap2[op]
 		if s.count != 0 || s.errors != 0 || s.inf != 0 {
 			t.Errorf("op=%s: expected zero after snapshot, got count=%d errors=%d inf=%d",
@@ -174,7 +177,7 @@ func TestCommaf(t *testing.T) {
 // ── StatsCollector ───────────────────────────────────────────────────────────
 
 func TestStatsCollector_print_resetsAllWorkers(t *testing.T) {
-	c := NewStatsCollector()
+	c := NewStatsCollector(testOps)
 	ws1 := c.NewWorkerStats()
 	ws2 := c.NewWorkerStats()
 
@@ -188,7 +191,7 @@ func TestStatsCollector_print_resetsAllWorkers(t *testing.T) {
 	// After print, both workers must be fully reset.
 	for _, ws := range []*WorkerStats{ws1, ws2} {
 		snap := ws.snapshot()
-		for _, op := range allOps {
+		for _, op := range testOps {
 			s := snap[op]
 			if s.count != 0 || s.errors != 0 || s.inf != 0 {
 				t.Errorf("op=%s: expected zero after print, got count=%d errors=%d inf=%d",
@@ -199,7 +202,7 @@ func TestStatsCollector_print_resetsAllWorkers(t *testing.T) {
 }
 
 func TestRunSummaryLoop_ticksAndExitsOnCancel(t *testing.T) {
-	c := NewStatsCollector()
+	c := NewStatsCollector(testOps)
 	ws := c.NewWorkerStats()
 	ws.Record(OpInsert, 0.05, nil)
 	ws.Record(OpReadSimple, 0.01, nil)

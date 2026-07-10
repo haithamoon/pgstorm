@@ -187,8 +187,15 @@ All configuration is via environment variables.
 
 ### Workload
 
+pgstorm runs one **workload profile** per process, selected by `PROFILE`. A profile owns
+its schema, its operation set, and the default op mix. The default `oltp-jsonb` profile is
+the mixed JSONB workload documented here; the profile seam exists so other PostgreSQL
+capabilities (e.g. vector search, queue patterns) can be added as additional profiles. The
+`*_PCT` variables below configure the `oltp-jsonb` op mix and must sum to 100.
+
 | Variable | Default | Description |
 |---|---|---|
+| `PROFILE` | `oltp-jsonb` | Workload profile to run (currently only `oltp-jsonb`) |
 | `WORKERS` | `20` | Number of concurrent worker goroutines per replica |
 | `WRITE_PCT` | `35` | % of operations that are INSERT transactions |
 | `READ_SIMPLE_PCT` | `15` | % of operations that are simple event reads |

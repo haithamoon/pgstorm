@@ -16,59 +16,6 @@ import (
 
 // ── pure helper tests ────────────────────────────────────────────────────────
 
-func TestSelectOp_allSixOps(t *testing.T) {
-	cfg := &config.Config{
-		WritePct: 35, ReadSimplePct: 15, ReadJoinPct: 20,
-		UpdatePct: 15, DeletePct: 10, ReadIPPct: 5,
-	}
-	// Cumulative boundaries: insert [0,35), read_simple [35,50),
-	// read_join [50,70), update [70,85), delete [85,95), read_by_ip [95,100).
-	tests := []struct {
-		roll int
-		want string
-	}{
-		{0, OpInsert},
-		{34, OpInsert},
-		{35, OpReadSimple},
-		{49, OpReadSimple},
-		{50, OpReadJoin},
-		{69, OpReadJoin},
-		{70, OpUpdate},
-		{84, OpUpdate},
-		{85, OpDelete},
-		{94, OpDelete},
-		{95, OpReadByIP},
-		{99, OpReadByIP},
-	}
-	for _, tc := range tests {
-		got := SelectOp(tc.roll, cfg)
-		if got != tc.want {
-			t.Errorf("roll=%d: want %s, got %s", tc.roll, tc.want, got)
-		}
-	}
-}
-
-func TestSelectOp_singleOp100Pct(t *testing.T) {
-	cfg := &config.Config{WritePct: 100}
-	for roll := 0; roll < 100; roll++ {
-		if SelectOp(roll, cfg) != OpInsert {
-			t.Fatalf("roll=%d: expected OpInsert when WritePct=100", roll)
-		}
-	}
-}
-
-func TestSelectOp_lastBucketFallback(t *testing.T) {
-	// Verify the fallback in SelectOp (roll lands exactly on sum boundary).
-	cfg := &config.Config{
-		WritePct: 50, ReadSimplePct: 50,
-	}
-	// roll=99 → cumulative after ReadSimple = 100 > 99 → OpReadSimple
-	got := SelectOp(99, cfg)
-	if got != OpReadSimple {
-		t.Errorf("want OpReadSimple, got %s", got)
-	}
-}
-
 func TestRandomIP_format(t *testing.T) {
 	rng := rand.New(rand.NewSource(1))
 	re := regexp.MustCompile(`^192\.168\.\d{1,3}\.\d{1,3}$`)
@@ -201,21 +148,21 @@ func (r *mockRow) Scan(dest ...any) error {
 
 type mockRows struct{ closed bool }
 
-func (r *mockRows) Close()                                         { r.closed = true }
-func (r *mockRows) Err() error                                     { return nil }
-func (r *mockRows) Next() bool                                     { return false }
-func (r *mockRows) Scan(dest ...any) error                         { return nil }
-func (r *mockRows) CommandTag() pgconn.CommandTag                  { return pgconn.CommandTag{} }
-func (r *mockRows) FieldDescriptions() []pgconn.FieldDescription   { return nil }
-func (r *mockRows) Values() ([]any, error)                         { return nil, nil }
-func (r *mockRows) RawValues() [][]byte                            { return nil }
-func (r *mockRows) Conn() *pgx.Conn                                { return nil }
+func (r *mockRows) Close()                                       { r.closed = true }
+func (r *mockRows) Err() error                                   { return nil }
+func (r *mockRows) Next() bool                                   { return false }
+func (r *mockRows) Scan(dest ...any) error                       { return nil }
+func (r *mockRows) CommandTag() pgconn.CommandTag                { return pgconn.CommandTag{} }
+func (r *mockRows) FieldDescriptions() []pgconn.FieldDescription { return nil }
+func (r *mockRows) Values() ([]any, error)                       { return nil, nil }
+func (r *mockRows) RawValues() [][]byte                          { return nil }
+func (r *mockRows) Conn() *pgx.Conn                              { return nil }
 
 // ── executor tests ───────────────────────────────────────────────────────────
 
 func testConfig() *config.Config {
 	return &config.Config{
-		WritePct: 100, MinPayloadKB: 4, MaxPayloadKB: 8, DeleteBatchSize: 50,
+		MinPayloadKB: 4, MaxPayloadKB: 8, DeleteBatchSize: 50,
 	}
 }
 
@@ -227,7 +174,7 @@ func TestExecute_emptyRing_skipsDB(t *testing.T) {
 	rng := rand.New(rand.NewSource(1))
 
 	// nil pool — any call on it would panic.
-	exec := NewExecutor(nil, ring, cfg, rng)
+	exec := newOLTPExecutor(nil, ring, cfg, rng)
 	ctx := context.Background()
 
 	for _, op := range []string{OpReadSimple, OpReadJoin, OpUpdate, OpDelete, OpReadByIP} {
@@ -245,7 +192,7 @@ func TestExecute_insert_commitsAndPushesRing(t *testing.T) {
 	cfg := testConfig()
 	rng := rand.New(rand.NewSource(1))
 
-	exec := NewExecutor(pool, ring, cfg, rng)
+	exec := newOLTPExecutor(pool, ring, cfg, rng)
 	if err := exec.Execute(context.Background(), OpInsert); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -271,7 +218,7 @@ func TestExecute_insert_rollsBackOnError(t *testing.T) {
 	cfg := testConfig()
 	rng := rand.New(rand.NewSource(1))
 
-	exec := NewExecutor(pool, ring, cfg, rng)
+	exec := newOLTPExecutor(pool, ring, cfg, rng)
 	err := exec.Execute(context.Background(), OpInsert)
 	if err == nil {
 		t.Fatal("expected error, got nil")
@@ -292,7 +239,7 @@ func TestExecute_delete_noTransaction(t *testing.T) {
 	cfg := testConfig()
 	rng := rand.New(rand.NewSource(1))
 
-	exec := NewExecutor(pool, ring, cfg, rng)
+	exec := newOLTPExecutor(pool, ring, cfg, rng)
 	if err := exec.Execute(context.Background(), OpDelete); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -306,7 +253,7 @@ func TestExecute_delete_noTransaction(t *testing.T) {
 
 func TestExecute_unknownOp(t *testing.T) {
 	ring := NewSessionRing(10)
-	exec := NewExecutor(nil, ring, testConfig(), rand.New(rand.NewSource(1)))
+	exec := newOLTPExecutor(nil, ring, testConfig(), rand.New(rand.NewSource(1)))
 	err := exec.Execute(context.Background(), "no_such_op")
 	if err == nil {
 		t.Fatal("expected error for unknown op, got nil")

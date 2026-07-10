@@ -12,7 +12,7 @@ import (
 	"pg-loadgen/config"
 )
 
-// DBPool is the subset of pgxpool.Pool used by Executor.
+// DBPool is the subset of pgxpool.Pool used by oltpExecutor.
 // *pgxpool.Pool satisfies this interface.
 type DBPool interface {
 	Begin(ctx context.Context) (pgx.Tx, error)
@@ -62,21 +62,24 @@ var regions = []string{"us-east-1", "us-west-2", "eu-west-1", "ap-southeast-1", 
 func randomIP(rng *rand.Rand) string {
 	return fmt.Sprintf("192.168.%d.%d", rng.Intn(256), rng.Intn(256))
 }
+
 var severities = []string{"info", "warn", "error", "debug"}
 var eventTypes = []string{"request", "response", "error", "auth", "payment", "audit", "system"}
 
-type Executor struct {
+// oltpExecutor implements the Executor interface for the oltp-jsonb profile.
+// One is created per worker, so its *rand.Rand needs no locking.
+type oltpExecutor struct {
 	pool DBPool
 	ring *SessionRing
 	cfg  *config.Config
 	rng  *rand.Rand
 }
 
-func NewExecutor(pool DBPool, ring *SessionRing, cfg *config.Config, rng *rand.Rand) *Executor {
-	return &Executor{pool: pool, ring: ring, cfg: cfg, rng: rng}
+func newOLTPExecutor(pool DBPool, ring *SessionRing, cfg *config.Config, rng *rand.Rand) *oltpExecutor {
+	return &oltpExecutor{pool: pool, ring: ring, cfg: cfg, rng: rng}
 }
 
-func (e *Executor) Execute(ctx context.Context, op string) error {
+func (e *oltpExecutor) Execute(ctx context.Context, op string) error {
 	switch op {
 	case OpInsert:
 		return e.doInsert(ctx)
@@ -95,7 +98,7 @@ func (e *Executor) Execute(ctx context.Context, op string) error {
 	}
 }
 
-func (e *Executor) doInsert(ctx context.Context) error {
+func (e *oltpExecutor) doInsert(ctx context.Context) error {
 	sessionID := uuid.New()
 	userID := uuid.New()
 	region := regions[e.rng.Intn(len(regions))]
@@ -157,7 +160,7 @@ func (e *Executor) doInsert(ctx context.Context) error {
 	return nil
 }
 
-func (e *Executor) doReadSimple(ctx context.Context) error {
+func (e *oltpExecutor) doReadSimple(ctx context.Context) error {
 	sessionID, ok := e.ring.Sample(e.rng)
 	if !ok {
 		return nil
@@ -187,7 +190,7 @@ func (e *Executor) doReadSimple(ctx context.Context) error {
 	return rows.Err()
 }
 
-func (e *Executor) doReadJoin(ctx context.Context) error {
+func (e *oltpExecutor) doReadJoin(ctx context.Context) error {
 	sessionID, ok := e.ring.Sample(e.rng)
 	if !ok {
 		return nil
@@ -225,7 +228,7 @@ func (e *Executor) doReadJoin(ctx context.Context) error {
 	return rows.Err()
 }
 
-func (e *Executor) doUpdate(ctx context.Context) error {
+func (e *oltpExecutor) doUpdate(ctx context.Context) error {
 	sessionID, ok := e.ring.Sample(e.rng)
 	if !ok {
 		return nil
@@ -280,7 +283,7 @@ func (e *Executor) doUpdate(ctx context.Context) error {
 	return tx.Commit(ctx)
 }
 
-func (e *Executor) doDelete(ctx context.Context) error {
+func (e *oltpExecutor) doDelete(ctx context.Context) error {
 	sessionID, ok := e.ring.Sample(e.rng)
 	if !ok {
 		return nil
@@ -302,7 +305,7 @@ func (e *Executor) doDelete(ctx context.Context) error {
 	return nil
 }
 
-func (e *Executor) doReadByIP(ctx context.Context) error {
+func (e *oltpExecutor) doReadByIP(ctx context.Context) error {
 	sessionID, ok := e.ring.Sample(e.rng)
 	if !ok {
 		return nil

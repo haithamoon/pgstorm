@@ -15,8 +15,6 @@ var bucketBounds = []float64{1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500}
 
 const numBuckets = 10
 
-var allOps = []string{OpInsert, OpReadSimple, OpReadJoin, OpUpdate, OpDelete, OpReadByIP}
-
 type opStats struct {
 	count   int64
 	errors  int64
@@ -31,9 +29,9 @@ type WorkerStats struct {
 	data map[string]*opStats
 }
 
-func newWorkerStats() *WorkerStats {
-	ws := &WorkerStats{data: make(map[string]*opStats, len(allOps))}
-	for _, op := range allOps {
+func newWorkerStats(ops []string) *WorkerStats {
+	ws := &WorkerStats{data: make(map[string]*opStats, len(ops))}
+	for _, op := range ops {
 		ws.data[op] = &opStats{}
 	}
 	return ws
@@ -79,16 +77,17 @@ type StatsCollector struct {
 	mu      sync.Mutex
 	workers []*WorkerStats
 	start   time.Time
+	ops     []string // op names to track/print, from the active profile
 }
 
-func NewStatsCollector() *StatsCollector {
-	return &StatsCollector{start: time.Now()}
+func NewStatsCollector(ops []string) *StatsCollector {
+	return &StatsCollector{start: time.Now(), ops: ops}
 }
 
 // NewWorkerStats creates a WorkerStats registered with the collector.
 // Call once per worker before starting it.
 func (c *StatsCollector) NewWorkerStats() *WorkerStats {
-	ws := newWorkerStats()
+	ws := newWorkerStats(c.ops)
 	c.mu.Lock()
 	c.workers = append(c.workers, ws)
 	c.mu.Unlock()
@@ -116,8 +115,8 @@ func (c *StatsCollector) print(now time.Time, window time.Duration, pool *pgxpoo
 	c.mu.Unlock()
 
 	// Merge snapshots from all workers
-	merged := make(map[string]*opStats, len(allOps))
-	for _, op := range allOps {
+	merged := make(map[string]*opStats, len(c.ops))
+	for _, op := range c.ops {
 		merged[op] = &opStats{}
 	}
 	for _, ws := range workers {
@@ -151,7 +150,7 @@ func (c *StatsCollector) print(now time.Time, window time.Duration, pool *pgxpoo
 	fmt.Printf("  │ %-12s │ %6s │ %7s │ %6s │ %6s │ %6s │\n",
 		"op", "count", "ops/s", "p50 ms", "p95 ms", "p99 ms")
 	fmt.Printf("  ├──────────────┼────────┼─────────┼────────┼────────┼────────┤\n")
-	for _, op := range allOps {
+	for _, op := range c.ops {
 		s := merged[op]
 		p50 := percentile(s, 0.50)
 		p95 := percentile(s, 0.95)

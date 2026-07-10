@@ -14,6 +14,17 @@ import (
 	"pg-loadgen/db"
 )
 
+// testSchema is a minimal three-table schema (FK-ordered) that exercises the
+// generic migration machinery without depending on any workload profile.
+var testSchema = db.Schema{
+	Tables: []string{
+		`CREATE TABLE IF NOT EXISTS sessions (id UUID PRIMARY KEY DEFAULT gen_random_uuid())`,
+		`CREATE TABLE IF NOT EXISTS events (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), session_id UUID NOT NULL REFERENCES sessions(id))`,
+		`CREATE TABLE IF NOT EXISTS audit_log (id UUID PRIMARY KEY DEFAULT gen_random_uuid())`,
+	},
+	TrackedTables: []string{"sessions", "events", "audit_log"},
+}
+
 func testPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	dsn := os.Getenv("PG_DSN")
@@ -50,7 +61,7 @@ func TestMigrateWithLock_createsTables(t *testing.T) {
 	t.Cleanup(func() { dropTables(t, pool) })
 
 	cfg := &config.Config{CreateIndexes: false, SchemaPollMs: 500}
-	if err := db.MigrateWithLock(context.Background(), pool, cfg); err != nil {
+	if err := db.MigrateWithLock(context.Background(), pool, cfg, testSchema); err != nil {
 		t.Fatalf("MigrateWithLock: %v", err)
 	}
 
@@ -76,11 +87,11 @@ func TestMigrateWithLock_idempotent(t *testing.T) {
 	t.Cleanup(func() { dropTables(t, pool) })
 
 	cfg := &config.Config{CreateIndexes: false, SchemaPollMs: 500}
-	if err := db.MigrateWithLock(context.Background(), pool, cfg); err != nil {
+	if err := db.MigrateWithLock(context.Background(), pool, cfg, testSchema); err != nil {
 		t.Fatalf("first migration: %v", err)
 	}
 	// Running again must not error (IF NOT EXISTS guards).
-	if err := db.MigrateWithLock(context.Background(), pool, cfg); err != nil {
+	if err := db.MigrateWithLock(context.Background(), pool, cfg, testSchema); err != nil {
 		t.Fatalf("second migration: %v", err)
 	}
 }
@@ -100,7 +111,7 @@ func TestWaitForSchema_blocks(t *testing.T) {
 
 	ready := make(chan error, 1)
 	go func() {
-		ready <- db.WaitForSchema(ctx, pool, false, 500*time.Millisecond)
+		ready <- db.WaitForSchema(ctx, pool, testSchema, false, 500*time.Millisecond)
 	}()
 
 	// Give goroutine A a head start before creating the tables.
@@ -108,7 +119,7 @@ func TestWaitForSchema_blocks(t *testing.T) {
 
 	go func() {
 		time.Sleep(200 * time.Millisecond)
-		if err := db.CreateTables(context.Background(), pool); err != nil {
+		if err := db.CreateTables(context.Background(), pool, testSchema); err != nil {
 			t.Errorf("CreateTables: %v", err)
 		}
 	}()
@@ -126,7 +137,7 @@ func TestWaitForSchema_blocks(t *testing.T) {
 
 	elapsed := time.Since(start)
 	if elapsed < 150*time.Millisecond {
-		t.Errorf("WaitForSchema returned too quickly (%.0f ms) — it did not block", elapsed.Milliseconds())
+		t.Errorf("WaitForSchema returned too quickly (%d ms) — it did not block", elapsed.Milliseconds())
 	}
 }
 
@@ -146,7 +157,7 @@ func TestMigrateWithLock_concurrent(t *testing.T) {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			errs[idx] = db.MigrateWithLock(ctx, pool, cfg)
+			errs[idx] = db.MigrateWithLock(ctx, pool, cfg, testSchema)
 		}(i)
 	}
 	wg.Wait()

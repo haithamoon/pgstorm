@@ -12,10 +12,10 @@ const templatePoolSize = 100
 
 // Two template pools: one for sessions (4–8 KB) and one for events (8–16 KB).
 var (
-	sessionTemplatePool    [templatePoolSize][]byte
-	sessionTraceIDOffsets  [templatePoolSize]int
-	eventTemplatePool      [templatePoolSize][]byte
-	eventTraceIDOffsets    [templatePoolSize]int
+	sessionTemplatePool   [templatePoolSize][]byte
+	sessionTraceIDOffsets [templatePoolSize]int
+	eventTemplatePool     [templatePoolSize][]byte
+	eventTraceIDOffsets   [templatePoolSize]int
 )
 
 func init() {
