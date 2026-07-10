@@ -13,6 +13,27 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
+func TestFindTraceIDOffset_notFound(t *testing.T) {
+	if off := findTraceIDOffset([]byte(`{"no":"such marker here"}`)); off != -1 {
+		t.Errorf("no trace_id marker: want -1, got %d", off)
+	}
+}
+
+func TestRandomBase64Exact(t *testing.T) {
+	rng := rand.New(rand.NewSource(1))
+	if s := randomBase64Exact(rng, 0); s != "" {
+		t.Errorf("n=0: want empty string, got %q", s)
+	}
+	if s := randomBase64Exact(rng, -4); s != "" {
+		t.Errorf("n<0: want empty string, got %q", s)
+	}
+	for _, n := range []int{1, 2, 3, 7, 64, 1000} {
+		if got := len(randomBase64Exact(rng, n)); got != n {
+			t.Errorf("randomBase64Exact(rng, %d): length %d, want exactly %d", n, got, n)
+		}
+	}
+}
+
 func TestBuildTemplate_validJSON(t *testing.T) {
 	for _, tc := range []struct{ min, max int }{{4, 8}, {8, 16}, {4, 4}} {
 		rng := rand.New(rand.NewSource(42))

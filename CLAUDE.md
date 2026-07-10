@@ -16,12 +16,13 @@ A Go-based PostgreSQL load generator that stresses **heap I/O**, **Toast storage
 **Active branch:** `main`
 
 ### In progress
-- **P0 + P1 done. P2:** all done except one — real percentiles, opt-in `READ_PAYLOAD`, deleted `wait_events.go` stub, **pluggable workload profiles** (Phases 1+2, see `docs/rfc-workload-profiles.md`), and **closed-loop rate limiting** (`TARGET_RATE_PER_SEC`). Only "raise payload cardinality" remains, and it's low-value (each write already gets a unique `trace_id`, so rows are byte-distinct — TOAST I/O volume is already realistic). **P3** next, pending profile #2 design: `pgvector` and message-queue benchmark profiles. Backlog detail in `CODE-REVIEW.md` (git-ignored).
+- **All of P0/P1/P2 are complete** (the last P2 item, "raise payload cardinality", was closed as won't-do — see `CODE-REVIEW.md` rationale). Comprehensive unit tests added and coverage verified (config 100%, workload 97.1%). **The only remaining work is P3** — `pgvector` and message-queue benchmark profiles — which is **blocked on a design decision** (which profile first) and would include the `workload/profiles/` subpackage reorg. Backlog detail in `CODE-REVIEW.md` (git-ignored); P3 design in `docs/rfc-workload-profiles.md`.
 
 ### Known open issues
 - None currently. (The old empty `metrics/wait_events.go` stub was deleted; wait-event logic lives in `pg_stats.go`.)
 
 ### Recently completed
+- **Test-coverage pass (2026-07-11):** added unit tests across the new/under-tested code — profile registry + OLTP accessors, weight resolution, `RunWorker`/`runOp` (fake profile), rate limiter, executor DB paths (mock pool/tx, happy + error + skip-locked), payload edges, config validation, `RecordOp`. config 100%, workload 97.1%; remaining gaps are DB-bound (integration/e2e-covered).
 - **Closed-loop rate limiting (2026-07-11, `0bdd495`):** `TARGET_RATE_PER_SEC` caps the per-replica op rate via a shared token-bucket `RateLimiter` (`workload/ratelimit.go`, elapsed-time accrual, 100ms burst); 0 = unlimited (default). Per-replica (N replicas → N× at the DB), warns if `THINK_TIME_MS` also set. Live-verified across 50/200/1000 ops/s.
 - **Pluggable workload profiles (2026-07-10):** refactored the fixed schema + 6-op workload into a `Profile` interface + registry; current workload is the default `oltp-jsonb` profile, selected via `PROFILE`. Op weights now resolve generically (`workload.ResolveWeights`, sum==100); `db/schema.go` runs a profile's `db.Schema` DDL; table/index stat loops are parameterized by tracked tables. Behavior-preserving (unit tests green, live-PG e2e created 3 tables + 11 indexes with the correct op mix). As-built simplifications and the eventual `workload/profiles/` layout are documented in `docs/rfc-workload-profiles.md`.
 - **P2 small items (2026-07-10, `b9e62c9`):** `percentile()` now interpolates within the histogram bucket (Prometheus-style) instead of snapping to the upper bound; opt-in `READ_PAYLOAD` makes `read_simple`/`read_by_ip` detoast+read `events.payload` (query variants precomputed as constants); deleted the empty `metrics/wait_events.go` stub.
@@ -111,14 +112,22 @@ No `ORDER BY random()` anywhere. No deadlocks possible on UPDATE (SKIP LOCKED).
 ### Unit tests (no database)
 Target pure-logic packages — run with `go test ./...`:
 
+Coverage as of 2026-07-11: **config 100%, workload 97.1%, metrics 20.9%** (metrics' remainder is DB-querying collectors/loops, covered by integration + the live e2e, not unit tests). Residual workload gaps are defensive DB-error wrappers inside multi-step transactions.
+
 | Package/File | What to test |
 |---|---|
 | `workload/ring.go` | Push/Sample behaviour, capacity wrapping, empty-ring nil return, concurrent push+sample |
-| `workload/payload.go` | Pool size selection (≤4 KB → session pool), mutation uniqueness, pad sizing, no compression artifacts |
-| `workload/stats.go` | Histogram bucket accumulation, p50/p95/p99 calculation, snapshot reset |
-| `config/config.go` | Sum validation (must equal 100), env-var defaults, invalid input errors |
+| `workload/payload.go` | Pool size selection (≤4 KB → session pool), mutation uniqueness, pad sizing, `randomBase64Exact` length/edges, `findTraceIDOffset` not-found |
+| `workload/stats.go` | Histogram bucket accumulation, p50/p95/p99 interpolation, snapshot reset |
+| `workload/weights.go` | `ResolveWeights` (env→weights, sum==100, negatives, malformed→default), `SelectOp` boundaries + fallthrough, `OpNames` |
+| `workload/profile.go` + `oltp.go` | registry get/unknown, `ProfileNames` sorted, OLTP ops-sum-100 / schema shape / Init builds ring |
+| `workload/worker.go` | `RunWorker` executes + records + exits on cancel, error-log path, rate-limiter honoured (via a fake Profile/Executor) |
+| `workload/ratelimit.go` | nil=unlimited, ctx-cancel unblocks, low-rate burst floor, rate is capped near target |
+| `workload/ops.go` | executor happy/rollback/skip-locked/error paths via mock pool+tx (Query/Exec/QueryRow) |
+| `config/config.go` | env-var defaults, `MIN>MAX` + negative-rate validation, `getEnv`/`getEnvInt`/`getEnvBool` |
+| `metrics/*` | delta trackers, PG14–17 version dispatch, pool collector (via `newPoolCollectorWith`), `RecordOp` ok/error counts |
 
-Use `go test -race ./...` — the ring buffer and stats structs have concurrent access patterns that the race detector catches.
+Use `go test -race ./...` — the ring buffer, stats structs, and rate-limiter have concurrent access patterns the race detector catches.
 
 ### Integration tests (live Postgres required)
 Located in `db/`, opt in with `-tags integration`:

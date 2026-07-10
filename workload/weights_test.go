@@ -54,6 +54,28 @@ func TestSelectOp_empty(t *testing.T) {
 	}
 }
 
+func TestSelectOp_rollAboveSumReturnsLast(t *testing.T) {
+	// Defensive fallthrough: if roll lands past the cumulative weight (e.g. weights
+	// don't reach 100), the last op absorbs it rather than returning "".
+	ops := []WeightedOp{{OpInsert, 10}, {OpDelete, 20}}
+	if got := SelectOp(50, ops); got != OpDelete {
+		t.Errorf("roll past sum: want %s, got %s", OpDelete, got)
+	}
+}
+
+func TestOpNames_preservesOrder(t *testing.T) {
+	names := OpNames([]WeightedOp{{OpInsert, 35}, {OpDelete, 10}, {OpReadByIP, 5}})
+	want := []string{OpInsert, OpDelete, OpReadByIP}
+	if len(names) != len(want) {
+		t.Fatalf("want %d names, got %d", len(want), len(names))
+	}
+	for i := range want {
+		if names[i] != want[i] {
+			t.Errorf("names[%d]: want %s, got %s", i, want[i], names[i])
+		}
+	}
+}
+
 // ── ResolveWeights ───────────────────────────────────────────────────────────
 
 // oltpOps is the shipped oltp-jsonb OpDef list, taken from the profile itself so

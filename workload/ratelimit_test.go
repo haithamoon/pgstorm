@@ -33,6 +33,19 @@ func TestRateLimiter_ctxCancelUnblocks(t *testing.T) {
 	}
 }
 
+func TestRateLimiter_lowRateBurstFloor(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// rate/10 == 0 for rates 1..9, so burst must clamp up to 1 (non-zero bucket).
+	rl := NewRateLimiter(ctx, 5)
+	if rl == nil {
+		t.Fatal("rate 5 should return a limiter")
+	}
+	if cap(rl.tokens) != 1 {
+		t.Errorf("low-rate burst floor: want token bucket cap 1, got %d", cap(rl.tokens))
+	}
+}
+
 func TestRateLimiter_capsRate(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

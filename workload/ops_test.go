@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/rand"
 	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -59,11 +60,14 @@ func TestBuildAuditDiff_sizeRange(t *testing.T) {
 // ── mock DB types ────────────────────────────────────────────────────────────
 
 type mockPool struct {
-	beginTx     *mockTx
-	beginErr    error
-	beginCalled bool
-	execSQL     []string
-	execErr     error
+	beginTx      *mockTx
+	beginErr     error
+	beginCalled  bool
+	execSQL      []string
+	execErr      error
+	queryErr     error  // error the next Query returns
+	queryRows    int    // rows the next Query returns
+	lastQuerySQL string // captured for assertions
 }
 
 func (m *mockPool) Begin(ctx context.Context) (pgx.Tx, error) {
@@ -75,7 +79,11 @@ func (m *mockPool) Begin(ctx context.Context) (pgx.Tx, error) {
 }
 
 func (m *mockPool) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
-	return &mockRows{}, nil
+	m.lastQuerySQL = sql
+	if m.queryErr != nil {
+		return nil, m.queryErr
+	}
+	return &mockRows{remaining: m.queryRows}, nil
 }
 
 func (m *mockPool) Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error) {
@@ -146,11 +154,20 @@ func (r *mockRow) Scan(dest ...any) error {
 	return nil
 }
 
-type mockRows struct{ closed bool }
+type mockRows struct {
+	closed    bool
+	remaining int
+}
 
-func (r *mockRows) Close()                                       { r.closed = true }
-func (r *mockRows) Err() error                                   { return nil }
-func (r *mockRows) Next() bool                                   { return false }
+func (r *mockRows) Close()     { r.closed = true }
+func (r *mockRows) Err() error { return nil }
+func (r *mockRows) Next() bool {
+	if r.remaining > 0 {
+		r.remaining--
+		return true
+	}
+	return false
+}
 func (r *mockRows) Scan(dest ...any) error                       { return nil }
 func (r *mockRows) CommandTag() pgconn.CommandTag                { return pgconn.CommandTag{} }
 func (r *mockRows) FieldDescriptions() []pgconn.FieldDescription { return nil }
@@ -257,5 +274,150 @@ func TestExecute_unknownOp(t *testing.T) {
 	err := exec.Execute(context.Background(), "no_such_op")
 	if err == nil {
 		t.Fatal("expected error for unknown op, got nil")
+	}
+}
+
+func TestExecute_readSimple_scansRowsAndSelectsPayload(t *testing.T) {
+	ring := NewSessionRing(4)
+	ring.Push(uuid.New())
+	rng := rand.New(rand.NewSource(1))
+
+	for _, readPayload := range []bool{false, true} {
+		pool := &mockPool{queryRows: 2} // exercise the row-iteration + Scan branch
+		cfg := testConfig()
+		cfg.ReadPayload = readPayload
+		exec := newOLTPExecutor(pool, ring, cfg, rng)
+		if err := exec.Execute(context.Background(), OpReadSimple); err != nil {
+			t.Fatalf("ReadPayload=%v: unexpected error %v", readPayload, err)
+		}
+		hasPayloadCol := strings.Contains(pool.lastQuerySQL, ", payload")
+		if hasPayloadCol != readPayload {
+			t.Errorf("ReadPayload=%v: query payload-column presence = %v", readPayload, hasPayloadCol)
+		}
+	}
+}
+
+func TestExecute_readByIP_scansRowsAndSelectsPayload(t *testing.T) {
+	ring := NewSessionRing(4)
+	ring.Push(uuid.New())
+	rng := rand.New(rand.NewSource(1))
+
+	for _, readPayload := range []bool{false, true} {
+		pool := &mockPool{queryRows: 3}
+		cfg := testConfig()
+		cfg.ReadPayload = readPayload
+		exec := newOLTPExecutor(pool, ring, cfg, rng)
+		if err := exec.Execute(context.Background(), OpReadByIP); err != nil {
+			t.Fatalf("ReadPayload=%v: unexpected error %v", readPayload, err)
+		}
+		if !strings.Contains(pool.lastQuerySQL, "source_ip >= $1::inet") {
+			t.Errorf("read_by_ip query missing inet range: %q", pool.lastQuerySQL)
+		}
+		if strings.Contains(pool.lastQuerySQL, ", payload") != readPayload {
+			t.Errorf("ReadPayload=%v: payload-column mismatch", readPayload)
+		}
+	}
+}
+
+func TestExecute_readJoin_issuesJoinQuery(t *testing.T) {
+	ring := NewSessionRing(4)
+	ring.Push(uuid.New())
+	pool := &mockPool{queryRows: 2}
+	exec := newOLTPExecutor(pool, ring, testConfig(), rand.New(rand.NewSource(1)))
+	if err := exec.Execute(context.Background(), OpReadJoin); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// The read ops discard scanned data, so assert the actual observable: the
+	// 3-table join query was issued (not a tautological err==nil check).
+	if !strings.Contains(pool.lastQuerySQL, "JOIN events") || !strings.Contains(pool.lastQuerySQL, "audit_log") {
+		t.Errorf("read_join did not issue the 3-table join query: %q", pool.lastQuerySQL)
+	}
+}
+
+func TestExecute_update_lockAcquired_commits(t *testing.T) {
+	ring := NewSessionRing(4)
+	ring.Push(uuid.New())
+	tx := &mockTx{queryRowResult: uuid.New()} // FOR UPDATE returned a row (lock held)
+	pool := &mockPool{beginTx: tx}
+	exec := newOLTPExecutor(pool, ring, testConfig(), rand.New(rand.NewSource(1)))
+	if err := exec.Execute(context.Background(), OpUpdate); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !tx.commitCalled {
+		t.Error("update should commit when the row lock is acquired")
+	}
+	if len(tx.execSQL) != 2 { // UPDATE sessions + INSERT audit_log
+		t.Errorf("expected 2 Exec calls (update + audit), got %d", len(tx.execSQL))
+	}
+}
+
+func TestExecute_update_skipLocked_returnsNilNoCommit(t *testing.T) {
+	ring := NewSessionRing(4)
+	ring.Push(uuid.New())
+	tx := &mockTx{queryRowErr: pgx.ErrNoRows} // row locked by another worker → skip
+	pool := &mockPool{beginTx: tx}
+	exec := newOLTPExecutor(pool, ring, testConfig(), rand.New(rand.NewSource(1)))
+	if err := exec.Execute(context.Background(), OpUpdate); err != nil {
+		t.Fatalf("skip-locked should return nil, got: %v", err)
+	}
+	if tx.commitCalled {
+		t.Error("update must not commit when the lock was skipped")
+	}
+}
+
+// ── error-path coverage ──────────────────────────────────────────────────────
+
+func TestExecute_readSimple_queryError(t *testing.T) {
+	ring := NewSessionRing(4)
+	ring.Push(uuid.New())
+	pool := &mockPool{queryErr: fmt.Errorf("boom")}
+	exec := newOLTPExecutor(pool, ring, testConfig(), rand.New(rand.NewSource(1)))
+	if err := exec.Execute(context.Background(), OpReadSimple); err == nil {
+		t.Fatal("expected error when Query fails")
+	}
+}
+
+func TestExecute_readByIP_queryError(t *testing.T) {
+	ring := NewSessionRing(4)
+	ring.Push(uuid.New())
+	pool := &mockPool{queryErr: fmt.Errorf("boom")}
+	exec := newOLTPExecutor(pool, ring, testConfig(), rand.New(rand.NewSource(1)))
+	if err := exec.Execute(context.Background(), OpReadByIP); err == nil {
+		t.Fatal("expected error when Query fails")
+	}
+}
+
+func TestExecute_readJoin_queryError(t *testing.T) {
+	ring := NewSessionRing(4)
+	ring.Push(uuid.New())
+	pool := &mockPool{queryErr: fmt.Errorf("boom")}
+	exec := newOLTPExecutor(pool, ring, testConfig(), rand.New(rand.NewSource(1)))
+	if err := exec.Execute(context.Background(), OpReadJoin); err == nil {
+		t.Fatal("expected error when Query fails")
+	}
+}
+
+func TestExecute_delete_execError(t *testing.T) {
+	ring := NewSessionRing(4)
+	ring.Push(uuid.New())
+	pool := &mockPool{execErr: fmt.Errorf("boom")}
+	exec := newOLTPExecutor(pool, ring, testConfig(), rand.New(rand.NewSource(1)))
+	if err := exec.Execute(context.Background(), OpDelete); err == nil {
+		t.Fatal("expected error when Exec fails")
+	}
+}
+
+func TestExecute_update_lockError(t *testing.T) {
+	ring := NewSessionRing(4)
+	ring.Push(uuid.New())
+	// A non-ErrNoRows error from the FOR UPDATE query must propagate.
+	tx := &mockTx{queryRowErr: fmt.Errorf("connection lost")}
+	pool := &mockPool{beginTx: tx}
+	exec := newOLTPExecutor(pool, ring, testConfig(), rand.New(rand.NewSource(1)))
+	if err := exec.Execute(context.Background(), OpUpdate); err == nil {
+		t.Fatal("expected error when the lock query fails")
+	}
+	if tx.commitCalled {
+		t.Error("must not commit after a lock-query error")
 	}
 }
