@@ -285,10 +285,17 @@ func (e *Executor) doReadByIP(ctx context.Context) error {
 	lo := fmt.Sprintf("192.168.%d.0", octet)
 	hi := fmt.Sprintf("192.168.%d.255", octet)
 
+	// Explicit ::inet casts make these comparisons independent of driver parameter
+	// typing. They aren't strictly required today — pgx sends the string params as
+	// unspecified-type, so PostgreSQL infers inet from context and the query works
+	// across every pgx exec mode (verified on PG16) — but the casts document intent
+	// and guard against a driver/mode change silently turning $1 into text (which
+	// has no `inet >= text` operator). This stays a B-tree range scan that
+	// idx_events_source_ip can satisfy.
 	rows, err := e.pool.Query(ctx,
 		`SELECT id, session_id, event_type, occurred_at, severity, trace_id
 		 FROM events
-		 WHERE source_ip >= $1 AND source_ip <= $2
+		 WHERE source_ip >= $1::inet AND source_ip <= $2::inet
 		 ORDER BY occurred_at DESC
 		 LIMIT 50`,
 		lo, hi,
