@@ -77,7 +77,7 @@ pgstorm/
 - **Hot path**: `metrics.RecordOp` is cheap — Counter/Histogram updates only, no locking
 - **Pool stats**: custom `PoolCollector` calls `pool.Stat()` once per Prometheus scrape, never inside workers
 - **Polling loops** (`RunTableStatsLoop`, `RunIndexStatsLoop`, `RunPGStatsLoop`): background goroutines that tick on `INDEX_STATS_INTERVAL_SECS`; all delta-track cumulative Postgres counters via `lastSeen` maps
-- **30s summary**: per-worker struct with no mutex on hot path; brief lock only during `snapshot()`; merges fixed-bucket histograms matching Prometheus bounds for p50/p95/p99
+- **30s summary**: per-worker struct guarded by a per-worker mutex — `Record()` locks on every op, but the lock is effectively uncontended (each worker owns its struct) except for the brief `snapshot()` the collector takes each interval; merges fixed-bucket histograms matching Prometheus bounds for p50/p95/p99
 
 ### Advisory lock DDL
 `db/schema.go` — exactly one replica runs DDL. Others poll `pg_tables` (and `pg_indexes` when `CREATE_INDEXES=true`) with 500ms sleep. Lock ID: `7654321` (hardcoded constant). **Do not change this constant** — it's the coordination key between replicas.
