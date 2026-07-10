@@ -12,21 +12,25 @@ A Go-based PostgreSQL load generator that stresses **heap I/O**, **Toast storage
 
 <!-- UPDATE THIS SECTION AT THE END OF EVERY SESSION -->
 
-**Last updated:** 2026-06-13
+**Last updated:** 2026-07-10
 **Active branch:** `main`
 
 ### In progress
-- Nothing — all work from this session is committed and pushed to main
+- Working through the P0/P1 backlog in `CODE-REVIEW.md` (git-ignored) one item at a time; each fix gets a high-effort `/code-review`. All P0 done; starting P1.
 
 ### Known open issues
-- `metrics/wait_events.go` is an empty stub (cannot delete files via tooling) — all wait event logic lives in `pg_stats.go`
+- `metrics/wait_events.go` is an empty stub (cannot delete files via tooling) — all wait event logic lives in `pg_stats.go` (tracked as a P2 item)
 
 ### Recently completed
+- **P0 review fixes (2026-07-10):**
+  - **P0 #1** (`ebeae90`): Prometheus was scraping nothing — targets were hardcoded to a typo'd/stale project prefix. Switched `monitoring/prometheus/prometheus.yml` to Docker DNS service discovery on the `loadgen` service; fixed README Quick Start (observe via Prometheus `:9091`/Grafana `:3000`, loadgen has no host port) and removed the false "randomly assigned host port" claim.
+  - **P0 #2** (`9eaae92`): `audit_log.diff` never TOASTed — its `strings.Repeat("x")` pad compressed to ~0.8% and stayed inline. Now pads with `randomBase64Exact` (base64 of random bytes; incompressible under pglz/lz4) so it stores out-of-line; also fixed an integer-truncation edge that emitted an empty pad for padLen 1–3.
+  - **P0 #3** (`162e22e`): `read_by_ip` inet comparison — verified NOT a bug (uncast query works across all pgx v5 exec modes on live PG16). Kept explicit `$1::inet`/`$2::inet` casts as defensive hardening.
 - Prometheus + Grafana added to Docker Compose (`monitoring/` directory); dashboards auto-provisioned on startup
 - `postgres_exporter` (v0.16.0) sidecar added; separate PostgreSQL Grafana dashboard provisioned
 - Wait Event analysis: `pgloadgen_wait_events_active` GaugeVec in `metrics/pg_stats.go`; polls `pg_stat_activity WHERE wait_event IS NOT NULL`; `Reset()` each tick; shares `INDEX_STATS_INTERVAL_SECS` tick
 - Stop hook added to `.claude/settings.json` — reminds to update CLAUDE.md when uncommitted changes exist
-- Loadgen scaled to 2 replicas × 2 workers; host port mapping removed; Prometheus scrapes both containers by Docker internal DNS name
+- Loadgen scaled to 2 replicas × 2 workers; host port mapping removed; Prometheus discovers replicas via Docker DNS service discovery (see P0 #1)
 
 ---
 
