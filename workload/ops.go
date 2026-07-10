@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/rand"
-	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -323,10 +322,18 @@ func buildAuditDiff(rng *rand.Rand) []byte {
 	}
 	data, _ := json.Marshal(diff)
 
-	// Pad to 2–4 KB to stress Toast storage on audit_log, matching schema design.
+	// Pad to 2–4 KB with base64 of random bytes. Postgres's only TOAST compressors,
+	// pglz and lz4, are LZ77 variants with no entropy coding, so they cannot shrink
+	// high-entropy base64 — the diff survives compression above the ~2 KB TOAST
+	// threshold and is genuinely stored out-of-line, matching sessions.metadata and
+	// events.payload. (A repeated-byte pad would compress away and leave the row
+	// inline, defeating the Toast stress this column exists to exercise.)
+	// randomBase64Exact returns exactly padLen chars (its alphabet needs no JSON
+	// escaping), so the document lands at targetSize even for tiny padLen — avoiding
+	// the integer-truncation-to-empty-pad that padLen*3/4 would hit for padLen 1–3.
 	targetSize := (2 + rng.Intn(3)) * 1024
 	if padLen := targetSize - len(data) - 12; padLen > 0 {
-		diff["_pad"] = strings.Repeat("x", padLen)
+		diff["_pad"] = randomBase64Exact(rng, padLen)
 		data, _ = json.Marshal(diff)
 	}
 	return data

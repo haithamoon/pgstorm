@@ -143,6 +143,21 @@ func randomBase64(rng *rand.Rand, n int) string {
 	return base64.StdEncoding.EncodeToString(b)
 }
 
+// randomBase64Exact returns exactly n high-entropy characters (base64 of random
+// bytes, sliced to length). Postgres's only TOAST compressors, pglz and lz4, are
+// LZ77 variants with no entropy coding, so they cannot shrink this content — it is
+// used to pad JSONB to a precise byte size that survives compression and forces
+// out-of-line TOAST storage. Returns "" for n <= 0.
+func randomBase64Exact(rng *rand.Rand, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	// base64 turns 3 bytes into 4 chars; request enough bytes to cover n chars,
+	// then slice to exactly n (still valid ASCII, still needs no JSON escaping).
+	s := randomBase64(rng, n*3/4+3)
+	return s[:n]
+}
+
 func buildStackTrace(rng *rand.Rand) []string {
 	frames := make([]string, 20+rng.Intn(21))
 	for i := range frames {
