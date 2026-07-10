@@ -30,11 +30,18 @@ cd pgstorm
 docker compose up --build
 ```
 
-The load generator starts immediately once Postgres is healthy. Metrics are available at:
+The load generator starts immediately once Postgres is healthy. `docker compose up` also brings up the full monitoring stack (Prometheus, Grafana, and postgres-exporter), so metrics are observable out of the box:
+
+- **Grafana** — http://localhost:3000 (login `admin` / `admin`); dashboards are auto-provisioned
+- **Prometheus** — http://localhost:9091
+
+The `loadgen` replicas deliberately do **not** publish a host port — Prometheus scrapes them directly over the Compose network via Docker DNS service discovery. To confirm metrics are flowing, check that the `pg-loadgen` targets are `up`:
 
 ```bash
-curl http://localhost:9090/metrics
+curl 'http://localhost:9091/api/v1/targets?state=active'
 ```
+
+To hit a raw `/metrics` endpoint directly (on `localhost:9090` by default, or whatever `METRICS_PORT` you set), run a single instance locally instead of via Compose (see the build-and-run command below) — the `loadgen` container image is `FROM scratch` and has no shell for `docker compose exec`.
 
 To wipe all data and start fresh:
 
@@ -349,7 +356,7 @@ To scale up in Docker Compose:
 docker compose up --build --scale loadgen=3
 ```
 
-Each replica exposes its metrics on a randomly assigned host port (mapped from container port 9090). To scrape all replicas, use Docker service discovery in your Prometheus config or add each host port explicitly.
+Replicas do not publish host ports. The bundled Prometheus discovers every replica automatically through Docker DNS service discovery on the `loadgen` service name (see `monitoring/prometheus/prometheus.yml`), so `--scale loadgen=N` is picked up without any config changes. Each replica still serves `/metrics` on container port 9090 within the Compose network.
 
 Health endpoints available on every replica:
 

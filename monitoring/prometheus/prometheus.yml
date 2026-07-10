@@ -4,10 +4,13 @@ global:
 
 scrape_configs:
   - job_name: pg-loadgen
-    static_configs:
-      - targets:
-          - 'postges-go-load-generator-loadgen-1:9090'
-          - 'postges-go-load-generator-loadgen-2:9090'
+    # Docker Compose's embedded DNS returns one A record per running replica of
+    # the `loadgen` service, so this discovers every replica automatically —
+    # no hardcoded container names, and it survives `--scale loadgen=N`.
+    dns_sd_configs:
+      - names: ['loadgen']
+        type: A
+        port: 9090
 
   - job_name: postgres
     static_configs:
