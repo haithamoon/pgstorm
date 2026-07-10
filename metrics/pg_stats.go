@@ -13,7 +13,8 @@ import (
 // bgwriter / checkpoint metrics.
 // PG14–16: all sourced from pg_stat_bgwriter.
 // PG17+:   checkpoint columns moved to pg_stat_checkpointer;
-//          buffers_backend removed entirely (no equivalent view).
+//
+//	buffers_backend removed entirely (no equivalent view).
 var (
 	bgwriterCheckpointsTimed = prometheus.NewCounter(prometheus.CounterOpts{
 		Namespace: namespace,
