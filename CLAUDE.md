@@ -19,7 +19,7 @@ A Go-based PostgreSQL load generator that stresses **heap I/O**, **Toast storage
 - All **P0 and P1** items from the `CODE-REVIEW.md` backlog (git-ignored) are done and pushed. **P2** (features/realism) not started — several (target-rate mode, pluggable schema) are larger features; parked pending discussion before starting.
 
 ### Known open issues
-- `metrics/wait_events.go` is an empty stub (cannot delete files via tooling) — all wait event logic lives in `pg_stats.go` (tracked as a P2 item)
+- None currently. (The old empty `metrics/wait_events.go` stub was deleted; wait-event logic lives in `pg_stats.go`.)
 
 ### Recently completed
 - **P1 review fixes (2026-07-10):** removed dead `LOG_LEVEL` config (`5f20e69`); corrected the false "Toast deduplication" rationale in CLAUDE.md (`1c55240`); moved `ready.Store(true)` to after workers spawn so `/readyz` is honest (`a089d43`); balanced the `WorkersActive` gauge via `defer Dec()` in a new `runOp()` helper — deliberately no `recover()`, since a review confirmed it would mask systematic panics (`a089d43`); corrected the "no mutex on hot path" note (`b78939a`).
@@ -54,8 +54,7 @@ pgstorm/
     ├── metrics.go            — OpsTotal (Counter), OpDuration (Histogram), WorkersActive (Gauge)
     ├── pool_collector.go     — custom Collector; calls pool.Stat() only at scrape time
     ├── index_stats.go        — table stats (always) + index stats (CREATE_INDEXES=true only)
-    ├── pg_stats.go           — bgwriter + WAL + wait events; delta tracking; PG14–17 support
-    └── wait_events.go        — empty stub (wait event logic is in pg_stats.go)
+    └── pg_stats.go           — bgwriter + WAL + wait events; delta tracking; PG14–17 support
 ```
 
 ---
@@ -173,6 +172,7 @@ PG_DSN="postgres://user:pass@localhost:5432/mydb?sslmode=disable" WORKERS=5 ./pg
 | `WORKERS` | 20 | Concurrent worker goroutines per replica |
 | `MIN_PAYLOAD_KB` | 8 | Min `events.payload` size |
 | `MAX_PAYLOAD_KB` | 16 | Max `events.payload` size |
+| `READ_PAYLOAD` | false | Include `events.payload` in `read_simple`/`read_by_ip` to exercise TOAST reads |
 | `CREATE_INDEXES` | false | Create 8 B-tree indexes (safe on live data) |
 | `RING_SIZE` | 10000 | Session UUID ring buffer capacity |
 | `DELETE_BATCH_SIZE` | 50 | Max events deleted per DELETE op |

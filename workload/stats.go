@@ -169,7 +169,12 @@ func (c *StatsCollector) print(now time.Time, window time.Duration, pool *pgxpoo
 	fmt.Printf("%s\n\n", sep)
 }
 
-// percentile computes a percentile value (0–1) from the fixed-bucket histogram.
+// percentile estimates a percentile value (q in 0–1) from the fixed-bucket
+// histogram using linear interpolation within the bucket that contains the
+// target rank — the same approach as Prometheus's histogram_quantile. Each
+// bucket i spans (lo, hi] where hi = bucketBounds[i] and lo = bucketBounds[i-1]
+// (lo = 0 for the first bucket); observations are assumed uniform within it, so
+// the estimate lands between the bounds rather than snapping to the upper edge.
 func percentile(s *opStats, q float64) float64 {
 	total := s.inf
 	for _, b := range s.buckets {
@@ -178,14 +183,30 @@ func percentile(s *opStats, q float64) float64 {
 	if total == 0 {
 		return 0
 	}
-	target := int64(float64(total) * q)
-	var cum int64
+	target := q * float64(total)
+	var cum float64
 	for i, b := range s.buckets {
-		cum += b
-		if cum >= target {
-			return bucketBounds[i]
+		if b == 0 {
+			continue
 		}
+		if cum+float64(b) >= target {
+			lo := 0.0
+			if i > 0 {
+				lo = bucketBounds[i-1]
+			}
+			hi := bucketBounds[i]
+			frac := (target - cum) / float64(b)
+			if frac < 0 {
+				frac = 0
+			} else if frac > 1 {
+				frac = 1
+			}
+			return lo + (hi-lo)*frac
+		}
+		cum += float64(b)
 	}
+	// Target falls in the +Inf overflow bucket (> the highest finite bound):
+	// there is no upper edge to interpolate to, so report that bound as a floor.
 	return bucketBounds[numBuckets-1]
 }
 

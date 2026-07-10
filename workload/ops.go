@@ -29,6 +29,34 @@ const (
 	OpReadByIP   = "read_by_ip"
 )
 
+// Read queries are precomputed constants (two variants each) rather than rebuilt
+// per call: e.cfg.ReadPayload is fixed for the process lifetime, so the hot path
+// just selects the right constant with no allocation. The *WithPayload variants
+// also fetch events.payload, so the read detoasts and transfers the out-of-line
+// JSONB — exercising TOAST reads instead of only the scalar columns.
+const (
+	readSimpleSQL = `SELECT id, event_type, occurred_at, severity, trace_id
+		 FROM events
+		 WHERE session_id = $1
+		 ORDER BY occurred_at DESC
+		 LIMIT 20`
+	readSimpleWithPayloadSQL = `SELECT id, event_type, occurred_at, severity, trace_id, payload
+		 FROM events
+		 WHERE session_id = $1
+		 ORDER BY occurred_at DESC
+		 LIMIT 20`
+	readByIPSQL = `SELECT id, session_id, event_type, occurred_at, severity, trace_id
+		 FROM events
+		 WHERE source_ip >= $1::inet AND source_ip <= $2::inet
+		 ORDER BY occurred_at DESC
+		 LIMIT 50`
+	readByIPWithPayloadSQL = `SELECT id, session_id, event_type, occurred_at, severity, trace_id, payload
+		 FROM events
+		 WHERE source_ip >= $1::inet AND source_ip <= $2::inet
+		 ORDER BY occurred_at DESC
+		 LIMIT 50`
+)
+
 var regions = []string{"us-east-1", "us-west-2", "eu-west-1", "ap-southeast-1", "ap-northeast-1"}
 
 func randomIP(rng *rand.Rand) string {
@@ -135,14 +163,11 @@ func (e *Executor) doReadSimple(ctx context.Context) error {
 		return nil
 	}
 
-	rows, err := e.pool.Query(ctx,
-		`SELECT id, event_type, occurred_at, severity, trace_id
-		 FROM events
-		 WHERE session_id = $1
-		 ORDER BY occurred_at DESC
-		 LIMIT 20`,
-		sessionID,
-	)
+	query := readSimpleSQL
+	if e.cfg.ReadPayload {
+		query = readSimpleWithPayloadSQL
+	}
+	rows, err := e.pool.Query(ctx, query, sessionID)
 	if err != nil {
 		return fmt.Errorf("read simple: %w", err)
 	}
@@ -152,7 +177,12 @@ func (e *Executor) doReadSimple(ctx context.Context) error {
 		var id uuid.UUID
 		var eventType, severity, traceID string
 		var occurredAt interface{}
-		_ = rows.Scan(&id, &eventType, &occurredAt, &severity, &traceID)
+		if e.cfg.ReadPayload {
+			var payload []byte
+			_ = rows.Scan(&id, &eventType, &occurredAt, &severity, &traceID, &payload)
+		} else {
+			_ = rows.Scan(&id, &eventType, &occurredAt, &severity, &traceID)
+		}
 	}
 	return rows.Err()
 }
@@ -292,14 +322,11 @@ func (e *Executor) doReadByIP(ctx context.Context) error {
 	// and guard against a driver/mode change silently turning $1 into text (which
 	// has no `inet >= text` operator). This stays a B-tree range scan that
 	// idx_events_source_ip can satisfy.
-	rows, err := e.pool.Query(ctx,
-		`SELECT id, session_id, event_type, occurred_at, severity, trace_id
-		 FROM events
-		 WHERE source_ip >= $1::inet AND source_ip <= $2::inet
-		 ORDER BY occurred_at DESC
-		 LIMIT 50`,
-		lo, hi,
-	)
+	query := readByIPSQL
+	if e.cfg.ReadPayload {
+		query = readByIPWithPayloadSQL
+	}
+	rows, err := e.pool.Query(ctx, query, lo, hi)
 	if err != nil {
 		return fmt.Errorf("read by ip: %w", err)
 	}
@@ -309,7 +336,12 @@ func (e *Executor) doReadByIP(ctx context.Context) error {
 		var id, sid uuid.UUID
 		var eventType, severity, traceID string
 		var occurredAt interface{}
-		_ = rows.Scan(&id, &sid, &eventType, &occurredAt, &severity, &traceID)
+		if e.cfg.ReadPayload {
+			var payload []byte
+			_ = rows.Scan(&id, &sid, &eventType, &occurredAt, &severity, &traceID, &payload)
+		} else {
+			_ = rows.Scan(&id, &sid, &eventType, &occurredAt, &severity, &traceID)
+		}
 	}
 	return rows.Err()
 }

@@ -98,14 +98,18 @@ func TestPercentile_empty(t *testing.T) {
 	}
 }
 
+func approxEq(a, b float64) bool { return a-b < 1e-9 && b-a < 1e-9 }
+
 func TestPercentile_allInFirstBucket(t *testing.T) {
 	s := &opStats{}
-	s.buckets[0] = 100 // all ≤ 1 ms
-	if p := percentile(s, 0.50); p != 1 {
-		t.Errorf("p50: want 1, got %v", p)
+	s.buckets[0] = 100 // all in (0, 1] ms
+	// First bucket spans (0, 1]; with 100 uniform obs, interpolation places the
+	// median at 0.5 ms and p99 at 0.99 ms (not snapped to the 1 ms upper edge).
+	if p := percentile(s, 0.50); !approxEq(p, 0.5) {
+		t.Errorf("p50: want 0.5, got %v", p)
 	}
-	if p := percentile(s, 0.99); p != 1 {
-		t.Errorf("p99: want 1, got %v", p)
+	if p := percentile(s, 0.99); !approxEq(p, 0.99) {
+		t.Errorf("p99: want 0.99, got %v", p)
 	}
 }
 
@@ -119,17 +123,17 @@ func TestPercentile_allInInf(t *testing.T) {
 }
 
 func TestPercentile_knownDistribution(t *testing.T) {
-	// 50 obs in ≤ 1 ms (bucket 0), 50 obs in ≤ 5 ms (bucket 1).
-	// p50: target=50, cum after bucket 0 = 50 ≥ 50 → 1 ms
-	// p99: target=99, cum after bucket 0 = 50 < 99, after bucket 1 = 100 ≥ 99 → 5 ms
+	// 50 obs in (0, 1] ms (bucket 0), 50 obs in (1, 5] ms (bucket 1).
+	// p50: target=50 lands exactly at the top of bucket 0 → 1 ms.
+	// p99: target=99 is 49/50 through bucket 1 (1,5] → 1 + 4*0.98 = 4.92 ms.
 	s := &opStats{}
 	s.buckets[0] = 50
 	s.buckets[1] = 50
-	if p := percentile(s, 0.50); p != 1 {
+	if p := percentile(s, 0.50); !approxEq(p, 1) {
 		t.Errorf("p50: want 1, got %v", p)
 	}
-	if p := percentile(s, 0.99); p != 5 {
-		t.Errorf("p99: want 5, got %v", p)
+	if p := percentile(s, 0.99); !approxEq(p, 4.92) {
+		t.Errorf("p99: want 4.92, got %v", p)
 	}
 }
 

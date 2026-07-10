@@ -207,6 +207,7 @@ All configuration is via environment variables.
 |---|---|---|
 | `MIN_PAYLOAD_KB` | `8` | Minimum `events.payload` size in KB |
 | `MAX_PAYLOAD_KB` | `16` | Maximum `events.payload` size in KB |
+| `READ_PAYLOAD` | `false` | Include `events.payload` in `read_simple` / `read_by_ip` so those reads detoast and transfer the JSONB, exercising TOAST *reads* (by default only `read_join` reads the payload) |
 
 ### Schema
 

@@ -11,6 +11,7 @@ type Config struct {
 	Workers int
 
 	CreateIndexes bool
+	ReadPayload   bool
 	RingSize      int
 
 	WritePct      int
@@ -41,6 +42,7 @@ func Load() (*Config, error) {
 		PGDSN:              getEnv("PG_DSN", "postgres://loadgen:loadgen@localhost:5432/loadtest?sslmode=disable"),
 		Workers:            getEnvInt("WORKERS", 20),
 		CreateIndexes:      getEnvBool("CREATE_INDEXES", false),
+		ReadPayload:        getEnvBool("READ_PAYLOAD", false),
 		RingSize:           getEnvInt("RING_SIZE", 10000),
 		WritePct:           getEnvInt("WRITE_PCT", 35),
 		ReadSimplePct:      getEnvInt("READ_SIMPLE_PCT", 15),
