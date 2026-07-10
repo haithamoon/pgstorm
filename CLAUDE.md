@@ -16,12 +16,13 @@ A Go-based PostgreSQL load generator that stresses **heap I/O**, **Toast storage
 **Active branch:** `main`
 
 ### In progress
-- All **P0 and P1** items from the `CODE-REVIEW.md` backlog (git-ignored) are done and pushed. **P2** (features/realism) not started — several (target-rate mode, pluggable schema) are larger features; parked pending discussion before starting.
+- **P0 + P1 done.** **P2:** the three small items are done (real percentiles, opt-in `READ_PAYLOAD` TOAST reads, deleted `wait_events.go` stub). The three larger P2 items are **parked for discussion**: raise payload cardinality, target-rate/closed-loop mode, and pluggable schema/workload (the last is the prereq for the **P3** roadmap — `pgvector` and message-queue benchmark profiles). See `CODE-REVIEW.md` (git-ignored).
 
 ### Known open issues
 - None currently. (The old empty `metrics/wait_events.go` stub was deleted; wait-event logic lives in `pg_stats.go`.)
 
 ### Recently completed
+- **P2 small items (2026-07-10, `b9e62c9`):** `percentile()` now interpolates within the histogram bucket (Prometheus-style) instead of snapping to the upper bound; opt-in `READ_PAYLOAD` makes `read_simple`/`read_by_ip` detoast+read `events.payload` (query variants precomputed as constants); deleted the empty `metrics/wait_events.go` stub.
 - **P1 review fixes (2026-07-10):** removed dead `LOG_LEVEL` config (`5f20e69`); corrected the false "Toast deduplication" rationale in CLAUDE.md (`1c55240`); moved `ready.Store(true)` to after workers spawn so `/readyz` is honest (`a089d43`); balanced the `WorkersActive` gauge via `defer Dec()` in a new `runOp()` helper — deliberately no `recover()`, since a review confirmed it would mask systematic panics (`a089d43`); corrected the "no mutex on hot path" note (`b78939a`).
 - **P0 review fixes (2026-07-10):**
   - **P0 #1** (`ebeae90`): Prometheus was scraping nothing — targets were hardcoded to a typo'd/stale project prefix. Switched `monitoring/prometheus/prometheus.yml` to Docker DNS service discovery on the `loadgen` service; fixed README Quick Start (observe via Prometheus `:9091`/Grafana `:3000`, loadgen has no host port) and removed the false "randomly assigned host port" claim.
