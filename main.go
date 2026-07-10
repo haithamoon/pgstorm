@@ -80,7 +80,6 @@ func main() {
 		}
 	}()
 
-	ready.Store(true)
 	log.Printf("starting %d workers", cfg.Workers)
 
 	ring := workload.NewSessionRing(cfg.RingSize)
@@ -114,6 +113,11 @@ func main() {
 			workload.RunWorker(runCtx, pool, ring, cfg, id, ws)
 		}(i, ws)
 	}
+
+	// Signal readiness only after the workers are actually launched, so /readyz
+	// reflects "workers started" as documented rather than flipping true while
+	// setup is still in progress.
+	ready.Store(true)
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
