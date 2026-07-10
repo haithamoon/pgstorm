@@ -118,13 +118,24 @@ func main() {
 		go metrics.RunIndexStatsLoop(runCtx, pool, indexStatsInterval, trackedTables)
 	}
 
+	// Shared closed-loop rate limiter (nil when TARGET_RATE_PER_SEC is 0/unset).
+	// The limit is per replica (this process, across its workers) — with N replicas
+	// the database sees up to N × TARGET_RATE_PER_SEC.
+	limiter := workload.NewRateLimiter(runCtx, cfg.TargetRatePerSec)
+	if limiter != nil {
+		log.Printf("rate limiting enabled: target %d ops/s per replica (across %d workers)", cfg.TargetRatePerSec, cfg.Workers)
+		if cfg.ThinkTimeMs > 0 {
+			log.Printf("warning: THINK_TIME_MS=%d and TARGET_RATE_PER_SEC=%d are both set; effective rate is the tighter of the two", cfg.ThinkTimeMs, cfg.TargetRatePerSec)
+		}
+	}
+
 	var wg sync.WaitGroup
 	for i := 0; i < cfg.Workers; i++ {
 		wg.Add(1)
 		ws := collector.NewWorkerStats()
 		go func(id int, ws *workload.WorkerStats) {
 			defer wg.Done()
-			workload.RunWorker(runCtx, profile, ops, cfg, id, ws)
+			workload.RunWorker(runCtx, profile, ops, cfg, limiter, id, ws)
 		}(i, ws)
 	}
 

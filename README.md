@@ -204,6 +204,7 @@ capabilities (e.g. vector search, queue patterns) can be added as additional pro
 | `DELETE_PCT` | `10` | % of operations that are batch event deletes |
 | `READ_IP_PCT` | `5` | % of operations that are source_ip range reads |
 | `THINK_TIME_MS` | `0` | Sleep between operations per worker (ms); `0` = full throttle |
+| `TARGET_RATE_PER_SEC` | `0` | Cap the op rate **per replica** (this process, across its workers); `0` = unlimited. With N replicas the DB sees up to N× this. If `THINK_TIME_MS` is also set, the effective rate is the tighter of the two |
 | `RUN_DURATION_SECS` | `0` | Stop after N seconds; `0` = run forever |
 
 > `WRITE_PCT + READ_SIMPLE_PCT + READ_JOIN_PCT + UPDATE_PCT + DELETE_PCT + READ_IP_PCT` must equal 100. The process exits at startup if they do not.

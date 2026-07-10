@@ -14,7 +14,7 @@ import (
 // profile, then loop — pick an op by weight, execute it, record latency/outcome —
 // until the context is cancelled. The op set and weights are profile-defined and
 // resolved once by the caller.
-func RunWorker(ctx context.Context, profile Profile, ops []WeightedOp, cfg *config.Config, id int, ws *WorkerStats) {
+func RunWorker(ctx context.Context, profile Profile, ops []WeightedOp, cfg *config.Config, limiter *RateLimiter, id int, ws *WorkerStats) {
 	rng := rand.New(rand.NewSource(time.Now().UnixNano() + int64(id)))
 	exec := profile.NewExecutor(rng)
 	thinkTime := time.Duration(cfg.ThinkTimeMs) * time.Millisecond
@@ -28,6 +28,12 @@ func RunWorker(ctx context.Context, profile Profile, ops []WeightedOp, cfg *conf
 
 		roll := rng.Intn(100)
 		op := SelectOp(roll, ops)
+
+		// Closed-loop pacing: block until the shared limiter grants a token (no-op
+		// when limiter is nil / TARGET_RATE_PER_SEC unset).
+		if !limiter.Wait(ctx) {
+			return
+		}
 
 		start := time.Now()
 		err := runOp(ctx, exec, op)

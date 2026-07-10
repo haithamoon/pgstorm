@@ -54,6 +54,7 @@ pgstorm/
 │   ├── payload.go            — two template pools (100 each); micro-mutation engine
 │   ├── ops.go                — oltp-jsonb's 6 DB operations (oltpExecutor)
 │   ├── worker.go             — RunWorker goroutine (drives a Profile); per-worker *rand.Rand
+│   ├── ratelimit.go          — shared token-bucket RateLimiter (TARGET_RATE_PER_SEC; nil = unlimited)
 │   └── stats.go              — per-worker stats; 30s rolling summary; fixed-bucket histograms
 └── metrics/
     ├── metrics.go            — OpsTotal (Counter), OpDuration (Histogram), WorkersActive (Gauge)
@@ -185,6 +186,7 @@ PG_DSN="postgres://user:pass@localhost:5432/mydb?sslmode=disable" WORKERS=5 ./pg
 | `CREATE_INDEXES` | false | Create 8 B-tree indexes (safe on live data) |
 | `RING_SIZE` | 10000 | Session UUID ring buffer capacity |
 | `DELETE_BATCH_SIZE` | 50 | Max events deleted per DELETE op |
+| `TARGET_RATE_PER_SEC` | 0 | Per-replica ops/sec cap (closed-loop, across the process's workers); 0 = unlimited; N replicas → N× at the DB. Shared token-bucket `RateLimiter` in `workload/ratelimit.go` |
 | `SCHEMA_POLL_MS` | 500 | Follower replica schema poll interval |
 | `METRICS_PORT` | 9090 | `/metrics`, `/healthz`, `/readyz` |
 | `SUMMARY_INTERVAL_SECS` | 30 | Stdout summary interval |
