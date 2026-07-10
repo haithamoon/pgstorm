@@ -34,7 +34,6 @@ type Config struct {
 	IndexStatsIntervalSecs int
 	ShutdownTimeoutSecs    int
 	SchemaPollMs           int
-	LogLevel               string
 }
 
 func Load() (*Config, error) {
@@ -59,7 +58,6 @@ func Load() (*Config, error) {
 		IndexStatsIntervalSecs: getEnvInt("INDEX_STATS_INTERVAL_SECS", 30),
 		ShutdownTimeoutSecs:    getEnvInt("SHUTDOWN_TIMEOUT_SECS", 5),
 		SchemaPollMs:           getEnvInt("SCHEMA_POLL_MS", 500),
-		LogLevel:               getEnv("LOG_LEVEL", "info"),
 	}
 
 	for _, p := range []struct {

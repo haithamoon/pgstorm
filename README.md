@@ -225,7 +225,6 @@ All configuration is via environment variables.
 | `SUMMARY_INTERVAL_SECS` | `30` | How often to print the per-op summary to stdout |
 | `INDEX_STATS_INTERVAL_SECS` | `30` | How often to poll Postgres for table and index stats |
 | `SHUTDOWN_TIMEOUT_SECS` | `5` | Grace period for the HTTP server to drain on shutdown |
-| `LOG_LEVEL` | `info` | Log verbosity |
 
 ---
 

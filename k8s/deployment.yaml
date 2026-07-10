@@ -20,7 +20,6 @@ data:
   RUN_DURATION_SECS: "0"
   SUMMARY_INTERVAL_SECS: "30"
   INDEX_STATS_INTERVAL_SECS: "30"
-  LOG_LEVEL: "info"
 ---
 apiVersion: apps/v1
 kind: Deployment

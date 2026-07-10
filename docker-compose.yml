@@ -38,7 +38,6 @@ services:
       RUN_DURATION_SECS: "900"
       SUMMARY_INTERVAL_SECS: "30"
       INDEX_STATS_INTERVAL_SECS: "30"
-      LOG_LEVEL: "info"
     depends_on:
       postgres:
         condition: service_healthy
