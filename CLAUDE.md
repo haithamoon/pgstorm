@@ -16,12 +16,13 @@ A Go-based PostgreSQL load generator that stresses **heap I/O**, **Toast storage
 **Active branch:** `main`
 
 ### In progress
-- Working through the P0/P1 backlog in `CODE-REVIEW.md` (git-ignored) one item at a time; each fix gets a high-effort `/code-review`. All P0 done; starting P1.
+- All **P0 and P1** items from the `CODE-REVIEW.md` backlog (git-ignored) are done and pushed. **P2** (features/realism) not started — several (target-rate mode, pluggable schema) are larger features; parked pending discussion before starting.
 
 ### Known open issues
 - `metrics/wait_events.go` is an empty stub (cannot delete files via tooling) — all wait event logic lives in `pg_stats.go` (tracked as a P2 item)
 
 ### Recently completed
+- **P1 review fixes (2026-07-10):** removed dead `LOG_LEVEL` config (`5f20e69`); corrected the false "Toast deduplication" rationale in CLAUDE.md (`1c55240`); moved `ready.Store(true)` to after workers spawn so `/readyz` is honest (`a089d43`); balanced the `WorkersActive` gauge via `defer Dec()` in a new `runOp()` helper — deliberately no `recover()`, since a review confirmed it would mask systematic panics (`a089d43`); corrected the "no mutex on hot path" note (`b78939a`).
 - **P0 review fixes (2026-07-10):**
   - **P0 #1** (`ebeae90`): Prometheus was scraping nothing — targets were hardcoded to a typo'd/stale project prefix. Switched `monitoring/prometheus/prometheus.yml` to Docker DNS service discovery on the `loadgen` service; fixed README Quick Start (observe via Prometheus `:9091`/Grafana `:3000`, loadgen has no host port) and removed the false "randomly assigned host port" claim.
   - **P0 #2** (`9eaae92`): `audit_log.diff` never TOASTed — its `strings.Repeat("x")` pad compressed to ~0.8% and stayed inline. Now pads with `randomBase64Exact` (base64 of random bytes; incompressible under pglz/lz4) so it stores out-of-line; also fixed an integer-truncation edge that emitted an empty pad for padLen 1–3.
