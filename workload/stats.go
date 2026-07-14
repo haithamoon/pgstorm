@@ -11,9 +11,11 @@ import (
 )
 
 // bucketBounds are upper bounds in milliseconds, matching the Prometheus histogram.
-var bucketBounds = []float64{1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500}
+// A fixed array (not a slice) so numBuckets is a compile-time constant derived from it,
+// keeping the buckets array size below in lockstep with the bounds.
+var bucketBounds = [...]float64{1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000}
 
-const numBuckets = 10
+const numBuckets = len(bucketBounds)
 
 type opStats struct {
 	count   int64
