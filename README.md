@@ -256,6 +256,10 @@ All metrics are prefixed with `pgloadgen_`. The `/metrics` endpoint also exposes
 | `pgloadgen_pool_idle_conns` | Gauge | Idle connections waiting in the pool |
 | `pgloadgen_pool_total_conns` | Gauge | Total open connections (acquired + idle) |
 | `pgloadgen_pool_max_conns` | Gauge | Pool capacity (`WORKERS + 5`) |
+| `pgloadgen_pool_acquire_count_total` | Counter | Cumulative successful connection acquisitions |
+| `pgloadgen_pool_empty_acquire_count_total` | Counter | Acquisitions that had to **wait** for a free connection — this wait is charged to op latency, so a rising value means client-side pool contention (not server slowness) |
+| `pgloadgen_pool_canceled_acquire_count_total` | Counter | Acquisitions cancelled by context before obtaining a connection |
+| `pgloadgen_pool_acquire_duration_seconds_total` | Counter | Cumulative time spent waiting to acquire a connection (seconds) |
 
 ### Table Stats *(always collected)*
 

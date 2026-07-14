@@ -5,22 +5,52 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
+// poolStats is a scrape-time snapshot of the pool's stats. The gauge fields are
+// point-in-time; the acquire fields are cumulative counters. AcquireDuration is
+// pre-converted to seconds.
+type poolStats struct {
+	acquired int32
+	idle     int32
+	total    int32
+	max      int32
+
+	acquireCount           int64
+	emptyAcquireCount      int64
+	canceledAcquireCount   int64
+	acquireDurationSeconds float64
+}
+
 type PoolCollector struct {
-	statFn   func() (acquired, idle, total, max int32)
+	statFn func() poolStats
+
 	acquired *prometheus.Desc
 	idle     *prometheus.Desc
 	total    *prometheus.Desc
 	maxConns *prometheus.Desc
+
+	acquireCount         *prometheus.Desc
+	emptyAcquireCount    *prometheus.Desc
+	canceledAcquireCount *prometheus.Desc
+	acquireDuration      *prometheus.Desc
 }
 
 func NewPoolCollector(pool *pgxpool.Pool) *PoolCollector {
-	return newPoolCollectorWith(func() (int32, int32, int32, int32) {
+	return newPoolCollectorWith(func() poolStats {
 		s := pool.Stat()
-		return s.AcquiredConns(), s.IdleConns(), s.TotalConns(), s.MaxConns()
+		return poolStats{
+			acquired:               s.AcquiredConns(),
+			idle:                   s.IdleConns(),
+			total:                  s.TotalConns(),
+			max:                    s.MaxConns(),
+			acquireCount:           s.AcquireCount(),
+			emptyAcquireCount:      s.EmptyAcquireCount(),
+			canceledAcquireCount:   s.CanceledAcquireCount(),
+			acquireDurationSeconds: s.AcquireDuration().Seconds(),
+		}
 	})
 }
 
-func newPoolCollectorWith(fn func() (int32, int32, int32, int32)) *PoolCollector {
+func newPoolCollectorWith(fn func() poolStats) *PoolCollector {
 	return &PoolCollector{
 		statFn: fn,
 		acquired: prometheus.NewDesc(
@@ -43,6 +73,26 @@ func newPoolCollectorWith(fn func() (int32, int32, int32, int32)) *PoolCollector
 			"Maximum number of connections allowed by the pool.",
 			nil, nil,
 		),
+		acquireCount: prometheus.NewDesc(
+			namespace+"_pool_acquire_count_total",
+			"Cumulative count of successful connection acquisitions from the pool.",
+			nil, nil,
+		),
+		emptyAcquireCount: prometheus.NewDesc(
+			namespace+"_pool_empty_acquire_count_total",
+			"Cumulative count of acquisitions that had to wait for a connection (pool was empty). Rising values mean workers are queueing on the pool, and that wait is charged to op latency.",
+			nil, nil,
+		),
+		canceledAcquireCount: prometheus.NewDesc(
+			namespace+"_pool_canceled_acquire_count_total",
+			"Cumulative count of acquisitions cancelled by context before a connection was obtained.",
+			nil, nil,
+		),
+		acquireDuration: prometheus.NewDesc(
+			namespace+"_pool_acquire_duration_seconds_total",
+			"Cumulative time spent waiting to acquire a connection from the pool, in seconds.",
+			nil, nil,
+		),
 	}
 }
 
@@ -51,12 +101,20 @@ func (c *PoolCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.idle
 	ch <- c.total
 	ch <- c.maxConns
+	ch <- c.acquireCount
+	ch <- c.emptyAcquireCount
+	ch <- c.canceledAcquireCount
+	ch <- c.acquireDuration
 }
 
 func (c *PoolCollector) Collect(ch chan<- prometheus.Metric) {
-	acquired, idle, total, max := c.statFn()
-	ch <- prometheus.MustNewConstMetric(c.acquired, prometheus.GaugeValue, float64(acquired))
-	ch <- prometheus.MustNewConstMetric(c.idle, prometheus.GaugeValue, float64(idle))
-	ch <- prometheus.MustNewConstMetric(c.total, prometheus.GaugeValue, float64(total))
-	ch <- prometheus.MustNewConstMetric(c.maxConns, prometheus.GaugeValue, float64(max))
+	s := c.statFn()
+	ch <- prometheus.MustNewConstMetric(c.acquired, prometheus.GaugeValue, float64(s.acquired))
+	ch <- prometheus.MustNewConstMetric(c.idle, prometheus.GaugeValue, float64(s.idle))
+	ch <- prometheus.MustNewConstMetric(c.total, prometheus.GaugeValue, float64(s.total))
+	ch <- prometheus.MustNewConstMetric(c.maxConns, prometheus.GaugeValue, float64(s.max))
+	ch <- prometheus.MustNewConstMetric(c.acquireCount, prometheus.CounterValue, float64(s.acquireCount))
+	ch <- prometheus.MustNewConstMetric(c.emptyAcquireCount, prometheus.CounterValue, float64(s.emptyAcquireCount))
+	ch <- prometheus.MustNewConstMetric(c.canceledAcquireCount, prometheus.CounterValue, float64(s.canceledAcquireCount))
+	ch <- prometheus.MustNewConstMetric(c.acquireDuration, prometheus.CounterValue, s.acquireDurationSeconds)
 }
