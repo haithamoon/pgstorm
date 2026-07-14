@@ -50,7 +50,7 @@ func TestRunWorker_executesAndExitsOnCancel(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		RunWorker(ctx, fakeProfile{count: &count}, []WeightedOp{{OpInsert, 100}}, cfg, nil, 0, ws)
+		RunWorker(ctx, fakeProfile{count: &count}, []WeightedOp{{OpInsert, 100}}, cfg, 0, ws)
 	}()
 
 	time.Sleep(30 * time.Millisecond)
@@ -78,7 +78,7 @@ func TestRunWorker_logsAndContinuesOnOpError(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		RunWorker(ctx, fakeProfile{count: &count, execErr: errBoom}, []WeightedOp{{OpInsert, 100}}, cfg, nil, 7, ws)
+		RunWorker(ctx, fakeProfile{count: &count, execErr: errBoom}, []WeightedOp{{OpInsert, 100}}, cfg, 7, ws)
 	}()
 	time.Sleep(20 * time.Millisecond)
 	cancel()
@@ -87,34 +87,5 @@ func TestRunWorker_logsAndContinuesOnOpError(t *testing.T) {
 	// Errors are recorded and the worker keeps running (doesn't exit on error).
 	if snap := ws.snapshot(); snap[OpInsert].errors == 0 {
 		t.Error("expected recorded op errors")
-	}
-}
-
-func TestRunWorker_honorsRateLimiter(t *testing.T) {
-	var count int64
-	ws := newWorkerStats([]string{OpInsert})
-	cfg := &config.Config{}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	limiter := NewRateLimiter(ctx, 100) // ~100 ops/s
-
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		RunWorker(ctx, fakeProfile{count: &count}, []WeightedOp{{OpInsert, 100}}, cfg, limiter, 0, ws)
-	}()
-
-	time.Sleep(150 * time.Millisecond)
-	cancel()
-	<-done
-
-	// At 100/s the feeder accrues ~15 tokens over 150ms (burst caps buffering at
-	// 10), so a correct limiter yields ~15-25. An unlimited worker would do many
-	// thousands. Upper bound 50 catches any ~2.5x+ throttling regression; because
-	// accrual is elapsed-time based, a slow/contended host yields *fewer* tokens,
-	// never more, so 50 cannot flake. Lower bound 3 is safely above the floor.
-	if n := atomic.LoadInt64(&count); n < 3 || n > 50 {
-		t.Errorf("rate-limited worker did %d ops in 150ms at 100/s; expected ~15-25 (bounds [3,50])", n)
 	}
 }
