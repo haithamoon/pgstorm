@@ -54,6 +54,12 @@ func Load() (*Config, error) {
 	// Op-mix weights are validated per-profile by workload.ResolveWeights, since
 	// each profile declares its own operations and env-var names.
 
+	if cfg.MinPayloadKB < 1 {
+		return nil, fmt.Errorf("MIN_PAYLOAD_KB must be >= 1, got %d", cfg.MinPayloadKB)
+	}
+	if cfg.MaxPayloadKB < 1 {
+		return nil, fmt.Errorf("MAX_PAYLOAD_KB must be >= 1, got %d", cfg.MaxPayloadKB)
+	}
 	if cfg.MinPayloadKB > cfg.MaxPayloadKB {
 		return nil, fmt.Errorf("MIN_PAYLOAD_KB (%d) must not exceed MAX_PAYLOAD_KB (%d)", cfg.MinPayloadKB, cfg.MaxPayloadKB)
 	}

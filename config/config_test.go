@@ -48,6 +48,30 @@ func TestLoad_minPayloadExceedsMax(t *testing.T) {
 	}
 }
 
+func TestLoad_negativeMinPayload(t *testing.T) {
+	t.Setenv("MIN_PAYLOAD_KB", "-1")
+	_, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "MIN_PAYLOAD_KB") {
+		t.Fatalf("want MIN_PAYLOAD_KB error, got %v", err)
+	}
+}
+
+func TestLoad_negativeMaxPayload(t *testing.T) {
+	t.Setenv("MAX_PAYLOAD_KB", "-1")
+	_, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "MAX_PAYLOAD_KB") {
+		t.Fatalf("want MAX_PAYLOAD_KB error, got %v", err)
+	}
+}
+
+func TestLoad_zeroPayloadRejected(t *testing.T) {
+	t.Setenv("MIN_PAYLOAD_KB", "0")
+	_, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "MIN_PAYLOAD_KB") {
+		t.Fatalf("want MIN_PAYLOAD_KB error for zero, got %v", err)
+	}
+}
+
 func TestLoad_minPayloadEqualToMax(t *testing.T) {
 	// MIN == MAX is valid: buildTemplate calls rng.Intn(1) which returns 0 safely.
 	t.Setenv("MIN_PAYLOAD_KB", "8")
