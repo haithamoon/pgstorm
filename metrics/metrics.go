@@ -25,10 +25,16 @@ var (
 		Name:      "workers_active",
 		Help:      "Number of worker goroutines currently executing a DB op.",
 	})
+
+	OpsSkipped = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: namespace,
+		Name:      "ops_skipped_total",
+		Help:      "Ops that intentionally did no DB work (e.g. empty ring at cold start). Not counted in ops_total or op_duration_seconds, so they don't skew rate/latency.",
+	}, []string{"op"})
 )
 
 func Register() {
-	prometheus.MustRegister(OpsTotal, OpDuration, WorkersActive)
+	prometheus.MustRegister(OpsTotal, OpDuration, WorkersActive, OpsSkipped)
 }
 
 func RecordOp(op string, durationSec float64, err error) {
@@ -38,4 +44,10 @@ func RecordOp(op string, durationSec float64, err error) {
 	}
 	OpsTotal.WithLabelValues(op, status).Inc()
 	OpDuration.WithLabelValues(op).Observe(durationSec)
+}
+
+// RecordSkip counts an op that intentionally did no DB work (returned errSkipped),
+// keeping it out of the op-rate and latency metrics.
+func RecordSkip(op string) {
+	OpsSkipped.WithLabelValues(op).Inc()
 }

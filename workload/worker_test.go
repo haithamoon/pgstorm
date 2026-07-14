@@ -9,9 +9,22 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 	"pg-loadgen/config"
 	"pg-loadgen/db"
+	"pg-loadgen/metrics"
 )
+
+// counterValue reads a Prometheus counter's current value without the (unvendored)
+// testutil package.
+func counterValue(c prometheus.Counter) float64 {
+	var m dto.Metric
+	if err := c.Write(&m); err != nil {
+		return 0
+	}
+	return m.GetCounter().GetValue()
+}
 
 var errBoom = errors.New("boom")
 
@@ -87,5 +100,36 @@ func TestRunWorker_logsAndContinuesOnOpError(t *testing.T) {
 	// Errors are recorded and the worker keeps running (doesn't exit on error).
 	if snap := ws.snapshot(); snap[OpInsert].errors == 0 {
 		t.Error("expected recorded op errors")
+	}
+}
+
+// A ring-skip (errSkipped) must NOT be counted as an executed op or a ~0ms latency
+// sample; it is surfaced via ops_skipped_total instead.
+func TestRunWorker_skipsNotCountedAsOps(t *testing.T) {
+	var count int64
+	ws := newWorkerStats([]string{OpInsert})
+	cfg := &config.Config{}
+
+	before := counterValue(metrics.OpsSkipped.WithLabelValues(OpInsert))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		RunWorker(ctx, fakeProfile{count: &count, execErr: errSkipped}, []WeightedOp{{OpInsert, 100}}, cfg, 0, ws)
+	}()
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+	<-done
+
+	if atomic.LoadInt64(&count) == 0 {
+		t.Fatal("executor never ran")
+	}
+	snap := ws.snapshot()
+	if snap[OpInsert].count != 0 || snap[OpInsert].errors != 0 {
+		t.Errorf("skip recorded as op: count=%d errors=%d (want 0/0)", snap[OpInsert].count, snap[OpInsert].errors)
+	}
+	if after := counterValue(metrics.OpsSkipped.WithLabelValues(OpInsert)); after <= before {
+		t.Errorf("ops_skipped_total not incremented: before=%v after=%v", before, after)
 	}
 }

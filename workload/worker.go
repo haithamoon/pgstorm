@@ -2,6 +2,7 @@ package workload
 
 import (
 	"context"
+	"errors"
 	"log"
 	"math/rand"
 	"time"
@@ -33,11 +34,18 @@ func RunWorker(ctx context.Context, profile Profile, ops []WeightedOp, cfg *conf
 		err := runOp(ctx, exec, op)
 		duration := time.Since(start).Seconds()
 
-		metrics.RecordOp(op, duration, err)
-		ws.Record(op, duration, err)
+		if errors.Is(err, errSkipped) {
+			// The op did no DB work (e.g. empty ring at cold start). Don't record it
+			// as an executed op or a ~0ms latency sample — that would deflate
+			// percentiles and inflate throughput. Surface it as a skip instead.
+			metrics.RecordSkip(op)
+		} else {
+			metrics.RecordOp(op, duration, err)
+			ws.Record(op, duration, err)
 
-		if err != nil && ctx.Err() == nil {
-			log.Printf("worker %d op=%s duration=%.3fs err=%v", id, op, duration, err)
+			if err != nil && ctx.Err() == nil {
+				log.Printf("worker %d op=%s duration=%.3fs err=%v", id, op, duration, err)
+			}
 		}
 
 		if thinkTime > 0 {
