@@ -100,20 +100,20 @@ func TestFindTraceIDOffset_pointsToHexChars(t *testing.T) {
 	}
 }
 
-func TestGetMutatedPayload_returnsValidJSON(t *testing.T) {
+func TestGetSessionPayload_returnsValidJSON(t *testing.T) {
 	rng := rand.New(rand.NewSource(1))
-	p := GetMutatedPayload(rng, 4, 8) // session pool
+	p := GetSessionPayload(rng)
 	if !json.Valid(p) {
-		t.Fatal("GetMutatedPayload returned invalid JSON")
+		t.Fatal("GetSessionPayload returned invalid JSON")
 	}
 }
 
-func TestGetMutatedPayload_sequentialCallsDifferentTraceIDs(t *testing.T) {
+func TestGetSessionPayload_sequentialCallsDifferentTraceIDs(t *testing.T) {
 	// Two sequential calls on the same RNG advance its state, so the
 	// mutated trace_id bytes will differ.
 	rng := rand.New(rand.NewSource(42))
-	p1 := GetMutatedPayload(rng, 4, 8)
-	p2 := GetMutatedPayload(rng, 4, 8)
+	p1 := GetSessionPayload(rng)
+	p2 := GetSessionPayload(rng)
 
 	var m1, m2 map[string]interface{}
 	if err := json.Unmarshal(p1, &m1); err != nil {
@@ -127,26 +127,60 @@ func TestGetMutatedPayload_sequentialCallsDifferentTraceIDs(t *testing.T) {
 	}
 }
 
-func TestGetMutatedPayload_mutatesOnlyTraceID(t *testing.T) {
+func TestGetSessionPayload_mutatesOnlyTraceID(t *testing.T) {
 	// Two calls on identical RNG seeds pick the same template slot and
 	// produce identical trace_id mutations — verifying the mutation is
 	// deterministic and isolated to trace_id.
-	p1 := GetMutatedPayload(rand.New(rand.NewSource(5)), 4, 8)
-	p2 := GetMutatedPayload(rand.New(rand.NewSource(5)), 4, 8)
+	p1 := GetSessionPayload(rand.New(rand.NewSource(5)))
+	p2 := GetSessionPayload(rand.New(rand.NewSource(5)))
 
 	if string(p1) != string(p2) {
 		t.Error("identical RNG seeds should produce identical payloads")
 	}
 }
 
-func TestGetMutatedPayload_eventPool(t *testing.T) {
-	// Event pool (minKB > 4) was populated by TestMain.
+func TestGetEventPayload_returnsValidJSON(t *testing.T) {
+	// Event pool was populated by TestMain (InitEventPool(8, 16)).
 	rng := rand.New(rand.NewSource(99))
-	p := GetMutatedPayload(rng, 8, 16)
+	p := GetEventPayload(rng)
 	if !json.Valid(p) {
 		t.Fatal("event pool payload is invalid JSON")
 	}
 	if len(p) < 4*1024 {
 		t.Errorf("event payload too small: %d bytes", len(p))
+	}
+}
+
+// TestGetEventPayload_honorsConfiguredRange is the regression test for the
+// pool-selection bug: previously GetMutatedPayload routed by minKB (<=4 → the
+// fixed 4–8 KB session pool), so MAX_PAYLOAD_KB was silently ignored. Selection
+// is now by field, so events always draw from the configured event pool. Build
+// the event pool for a large range and confirm event payloads clearly exceed the
+// session pool's 8 KB ceiling while session payloads do not.
+func TestGetEventPayload_honorsConfiguredRange(t *testing.T) {
+	InitEventPool(32, 64)              // large configured range
+	defer InitEventPool(8, 16)         // restore for other tests (run sequentially)
+
+	rng := rand.New(rand.NewSource(7))
+
+	var maxEvent int
+	for i := 0; i < 100; i++ {
+		if n := len(GetEventPayload(rng)); n > maxEvent {
+			maxEvent = n
+		}
+	}
+	if maxEvent <= 16*1024 {
+		t.Errorf("event pool built for 32–64 KB but largest of 100 payloads was %d bytes; "+
+			"selection appears to still ignore the configured range", maxEvent)
+	}
+
+	var maxSession int
+	for i := 0; i < 100; i++ {
+		if n := len(GetSessionPayload(rng)); n > maxSession {
+			maxSession = n
+		}
+	}
+	if maxSession > 16*1024 {
+		t.Errorf("session payload should stay in the fixed 4–8 KB pool, got %d bytes", maxSession)
 	}
 }
