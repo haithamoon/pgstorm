@@ -2,7 +2,6 @@ package workload
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"math/rand"
@@ -149,7 +148,7 @@ func (e *oltpExecutor) doInsert(ctx context.Context) error {
 
 	auditID := uuid.New()
 	changedBy := uuid.New()
-	diff := buildAuditDiff(e.rng)
+	diff := GetAuditDiff(e.rng)
 	checksum := fmt.Sprintf("%016x", e.rng.Int63())
 
 	_, err = tx.Exec(ctx,
@@ -277,7 +276,7 @@ func (e *oltpExecutor) doUpdate(ctx context.Context) error {
 
 	auditID := uuid.New()
 	changedBy := uuid.New()
-	diff := buildAuditDiff(e.rng)
+	diff := GetAuditDiff(e.rng)
 	checksum := fmt.Sprintf("%016x", e.rng.Int63())
 
 	_, err = tx.Exec(ctx,
@@ -358,34 +357,3 @@ func (e *oltpExecutor) doReadByIP(ctx context.Context) error {
 	return rows.Err()
 }
 
-func buildAuditDiff(rng *rand.Rand) []byte {
-	diff := map[string]interface{}{
-		"before": map[string]interface{}{
-			"status":   "active",
-			"metadata": randomString(rng, 50, 100),
-		},
-		"after": map[string]interface{}{
-			"status":   "closed",
-			"metadata": randomString(rng, 50, 100),
-		},
-		"changed_fields": []string{"status", "metadata", "ended_at"},
-		"context":        randomString(rng, 100, 200),
-	}
-	data, _ := json.Marshal(diff)
-
-	// Pad to 2–4 KB with base64 of random bytes. Postgres's only TOAST compressors,
-	// pglz and lz4, are LZ77 variants with no entropy coding, so they cannot shrink
-	// high-entropy base64 — the diff survives compression above the ~2 KB TOAST
-	// threshold and is genuinely stored out-of-line, matching sessions.metadata and
-	// events.payload. (A repeated-byte pad would compress away and leave the row
-	// inline, defeating the Toast stress this column exists to exercise.)
-	// randomBase64Exact returns exactly padLen chars (its alphabet needs no JSON
-	// escaping), so the document lands at targetSize even for tiny padLen — avoiding
-	// the integer-truncation-to-empty-pad that padLen*3/4 would hit for padLen 1–3.
-	targetSize := (2 + rng.Intn(3)) * 1024
-	if padLen := targetSize - len(data) - 12; padLen > 0 {
-		diff["_pad"] = randomBase64Exact(rng, padLen)
-		data, _ = json.Marshal(diff)
-	}
-	return data
-}
