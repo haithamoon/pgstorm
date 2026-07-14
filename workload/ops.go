@@ -111,7 +111,7 @@ func (e *oltpExecutor) doInsert(ctx context.Context) error {
 	sessionID := uuid.New()
 	userID := uuid.New()
 	region := regions[e.rng.Intn(len(regions))]
-	metadata := GetMutatedPayload(e.rng, 4, 8)
+	metadata := GetSessionPayload(e.rng)
 	numEvents := 1 + e.rng.Intn(3)
 
 	tx, err := e.pool.Begin(ctx)
@@ -131,7 +131,7 @@ func (e *oltpExecutor) doInsert(ctx context.Context) error {
 
 	for i := 0; i < numEvents; i++ {
 		eventID := uuid.New()
-		payload := GetMutatedPayload(e.rng, e.cfg.MinPayloadKB, e.cfg.MaxPayloadKB)
+		payload := GetEventPayload(e.rng)
 		traceID := fmt.Sprintf("%016x", e.rng.Int63())
 		severity := severities[e.rng.Intn(len(severities))]
 		evType := eventTypes[e.rng.Intn(len(eventTypes))]
@@ -243,7 +243,7 @@ func (e *oltpExecutor) doUpdate(ctx context.Context) error {
 		return errSkipped
 	}
 
-	metadata := GetMutatedPayload(e.rng, 4, 8)
+	metadata := GetSessionPayload(e.rng)
 
 	tx, err := e.pool.Begin(ctx)
 	if err != nil {

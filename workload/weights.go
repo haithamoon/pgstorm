@@ -2,6 +2,7 @@ package workload
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"strconv"
 )
@@ -24,9 +25,12 @@ func ResolveWeights(ops []OpDef) ([]WeightedOp, error) {
 		if v := os.Getenv(od.EnvVar); v != "" {
 			// A malformed value falls back to the default, matching config.getEnvInt
 			// so the op mix parses exactly as it did before profiles (fail-loud on
-			// bad config would be a separate, codebase-wide decision).
+			// bad config would be a separate, codebase-wide decision). We do, however,
+			// warn so a typo'd weight isn't silently ignored.
 			if n, err := strconv.Atoi(v); err == nil {
 				w = n
+			} else {
+				log.Printf("warning: %s=%q is not a valid integer; using default %d", od.EnvVar, v, od.DefaultWeight)
 			}
 		}
 		if w < 0 {

@@ -1,6 +1,9 @@
 package workload
 
 import (
+	"bytes"
+	"log"
+	"os"
 	"strings"
 	"testing"
 )
@@ -154,13 +157,22 @@ func TestResolveWeights_negativeRejected(t *testing.T) {
 func TestResolveWeights_invalidIntFallsToDefault(t *testing.T) {
 	// Matches config.getEnvInt: a malformed value falls back to the default rather
 	// than aborting startup, so a typo'd *_PCT parses exactly as it did pre-refactor.
+	// It must, however, log a warning so the typo isn't silently ignored.
 	clearOpEnv(t)
-	t.Setenv("WRITE_PCT", "abc")
+	t.Setenv("WRITE_PCT", "4O") // letter O, not zero
+
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	defer log.SetOutput(os.Stderr)
+
 	got, err := ResolveWeights(oltpOps)
 	if err != nil {
 		t.Fatalf("malformed value should fall back to default, got error: %v", err)
 	}
 	if got[0].Name != OpInsert || got[0].Weight != 35 {
-		t.Errorf("WRITE_PCT=abc should fall back to default 35, got %+v", got[0])
+		t.Errorf("WRITE_PCT=4O should fall back to default 35, got %+v", got[0])
+	}
+	if logged := buf.String(); !strings.Contains(logged, "WRITE_PCT") || !strings.Contains(logged, "warning") {
+		t.Errorf("expected a warning naming WRITE_PCT, got %q", logged)
 	}
 }

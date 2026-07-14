@@ -34,19 +34,23 @@ func InitEventPool(minKB, maxKB int) {
 	}
 }
 
-// GetMutatedPayload returns a copy of a template with a mutated trace_id.
-// minKB/maxKB select which pool to draw from: 4–8 → session pool, 8–16 → event pool.
-func GetMutatedPayload(rng *rand.Rand, minKB, maxKB int) []byte {
-	var pool *[templatePoolSize][]byte
-	var offsets *[templatePoolSize]int
-	if minKB <= 4 {
-		pool = &sessionTemplatePool
-		offsets = &sessionTraceIDOffsets
-	} else {
-		pool = &eventTemplatePool
-		offsets = &eventTraceIDOffsets
-	}
+// GetSessionPayload returns a mutated copy of a session-metadata template,
+// always drawn from the fixed 4–8 KB session pool. Use for sessions.metadata.
+func GetSessionPayload(rng *rand.Rand) []byte {
+	return mutatedPayload(rng, &sessionTemplatePool, &sessionTraceIDOffsets)
+}
 
+// GetEventPayload returns a mutated copy of an event template, always drawn from
+// the configured event pool (sized by MIN/MAX_PAYLOAD_KB via InitEventPool). Use
+// for events.payload. Pool selection is by field, not by size, so the configured
+// range is always honored — even when MIN_PAYLOAD_KB <= 4.
+func GetEventPayload(rng *rand.Rand) []byte {
+	return mutatedPayload(rng, &eventTemplatePool, &eventTraceIDOffsets)
+}
+
+// mutatedPayload copies a random template from the given pool and rewrites its
+// trace_id (16 hex chars) so each returned value is byte-unique.
+func mutatedPayload(rng *rand.Rand, pool *[templatePoolSize][]byte, offsets *[templatePoolSize]int) []byte {
 	idx := rng.Intn(templatePoolSize)
 	buf := make([]byte, len(pool[idx]))
 	copy(buf, pool[idx])
