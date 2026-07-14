@@ -29,11 +29,11 @@ func TestRandomIP_format(t *testing.T) {
 	}
 }
 
-func TestBuildAuditDiff_validJSON(t *testing.T) {
+func TestGetAuditDiff_validJSON(t *testing.T) {
 	rng := rand.New(rand.NewSource(1))
-	data := buildAuditDiff(rng)
+	data := GetAuditDiff(rng)
 	if !json.Valid(data) {
-		t.Fatal("buildAuditDiff returned invalid JSON")
+		t.Fatal("GetAuditDiff returned invalid JSON")
 	}
 	var m map[string]interface{}
 	json.Unmarshal(data, &m) //nolint
@@ -44,17 +44,32 @@ func TestBuildAuditDiff_validJSON(t *testing.T) {
 	}
 }
 
-func TestBuildAuditDiff_sizeRange(t *testing.T) {
-	// The padding logic subtracts 12 bytes for key overhead, so the result can
-	// land fractionally below 2 KB when the pre-pad JSON is already large.
+func TestGetAuditDiff_sizeRange(t *testing.T) {
+	// Behavior preserved from the original buildAuditDiff: targetSize is 2–4 KB but
+	// the padding logic subtracts ~12 bytes for key overhead, so a diff can land
+	// fractionally below 2 KB (~2046 bytes) when the pre-pad JSON is already large.
 	// Lower bound is 1.9 KB to account for this.
 	rng := rand.New(rand.NewSource(1))
 	for i := 0; i < 50; i++ {
-		data := buildAuditDiff(rng)
+		data := GetAuditDiff(rng)
 		kb := float64(len(data)) / 1024
 		if kb < 1.9 || kb > 4.5 {
 			t.Errorf("iteration %d: size %.2f KB outside [1.9, 4.5]", i, kb)
 		}
+	}
+}
+
+// TestGetAuditDiff_byteUnique proves the pooled diff is mutated per call (the
+// 16-hex _nonce is rewritten), so no two writes emit byte-identical audit diffs.
+func TestGetAuditDiff_byteUnique(t *testing.T) {
+	rng := rand.New(rand.NewSource(7))
+	seen := make(map[string]struct{}, 500)
+	for i := 0; i < 500; i++ {
+		s := string(GetAuditDiff(rng))
+		if _, dup := seen[s]; dup {
+			t.Fatalf("iteration %d: GetAuditDiff returned a byte-identical diff", i)
+		}
+		seen[s] = struct{}{}
 	}
 }
 

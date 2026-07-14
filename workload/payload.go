@@ -10,18 +10,26 @@ import (
 
 const templatePoolSize = 100
 
-// Two template pools: one for sessions (4–8 KB) and one for events (8–16 KB).
+// Three template pools: sessions (4–8 KB), events (8–16 KB), and audit_log.diff
+// (2–4 KB). Each entry is pre-marshaled JSON; a 16-hex mutable field (trace_id for
+// sessions/events, _nonce for audit) is rewritten per use so every returned value
+// is byte-unique without any marshaling on the write hot path.
 var (
 	sessionTemplatePool   [templatePoolSize][]byte
 	sessionTraceIDOffsets [templatePoolSize]int
 	eventTemplatePool     [templatePoolSize][]byte
 	eventTraceIDOffsets   [templatePoolSize]int
+	auditTemplatePool     [templatePoolSize][]byte
+	auditNonceOffsets     [templatePoolSize]int
 )
 
 func init() {
 	for i := 0; i < templatePoolSize; i++ {
 		rng := rand.New(rand.NewSource(int64(i)))
 		sessionTemplatePool[i], sessionTraceIDOffsets[i] = buildTemplate(rng, 4, 8)
+
+		arng := rand.New(rand.NewSource(int64(i + 2*templatePoolSize)))
+		auditTemplatePool[i], auditNonceOffsets[i] = buildAuditTemplate(arng)
 	}
 }
 
@@ -48,8 +56,18 @@ func GetEventPayload(rng *rand.Rand) []byte {
 	return mutatedPayload(rng, &eventTemplatePool, &eventTraceIDOffsets)
 }
 
+// GetAuditDiff returns a mutated copy of an audit_log.diff template (2–4 KB, with
+// an incompressible base64 pad so it stays above the ~2 KB TOAST threshold and
+// stores out-of-line). The 16-hex _nonce is rewritten per call so each written
+// value is byte-unique — no json.Marshal or entropy generation on the hot path
+// (that happens once per template at init). Use for audit_log.diff.
+func GetAuditDiff(rng *rand.Rand) []byte {
+	return mutatedPayload(rng, &auditTemplatePool, &auditNonceOffsets)
+}
+
 // mutatedPayload copies a random template from the given pool and rewrites its
-// trace_id (16 hex chars) so each returned value is byte-unique.
+// 16-hex mutable field (trace_id for payloads, _nonce for audit diffs) at the
+// recorded offset so each returned value is byte-unique.
 func mutatedPayload(rng *rand.Rand, pool *[templatePoolSize][]byte, offsets *[templatePoolSize]int) []byte {
 	idx := rng.Intn(templatePoolSize)
 	buf := make([]byte, len(pool[idx]))
@@ -101,6 +119,55 @@ func buildTemplate(rng *rand.Rand, minKB, maxKB int) ([]byte, int) {
 
 func findTraceIDOffset(data []byte) int {
 	marker := []byte(`"trace_id":"`)
+	idx := bytes.Index(data, marker)
+	if idx < 0 {
+		return -1
+	}
+	return idx + len(marker)
+}
+
+// buildAuditTemplate builds one audit_log.diff template (2–4 KB) and returns it
+// with the byte offset of its 16-hex _nonce field. All marshaling and entropy
+// generation happen here — once per template at init — never on the write hot path;
+// GetAuditDiff then copies a template and mutates the nonce.
+func buildAuditTemplate(rng *rand.Rand) ([]byte, int) {
+	diff := map[string]interface{}{
+		// _nonce is a fixed-width 16-hex field mutated per use so each written diff
+		// is byte-unique (analogous to trace_id in the payload templates). It sorts
+		// first among the keys, so its offset is stable across all templates.
+		"_nonce": fmt.Sprintf("%016x", rng.Int63()),
+		"before": map[string]interface{}{
+			"status":   "active",
+			"metadata": randomString(rng, 50, 100),
+		},
+		"after": map[string]interface{}{
+			"status":   "closed",
+			"metadata": randomString(rng, 50, 100),
+		},
+		"changed_fields": []string{"status", "metadata", "ended_at"},
+		"context":        randomString(rng, 100, 200),
+	}
+	data, _ := json.Marshal(diff)
+
+	// Pad to 2–4 KB with base64 of random bytes. Postgres's only TOAST compressors,
+	// pglz and lz4, are LZ77 variants with no entropy coding, so they cannot shrink
+	// high-entropy base64 — the diff survives compression above the ~2 KB TOAST
+	// threshold and is genuinely stored out-of-line, matching sessions.metadata and
+	// events.payload. (A repeated-byte pad would compress away and leave the row
+	// inline, defeating the Toast stress this column exists to exercise.)
+	// randomBase64Exact returns exactly padLen chars (its alphabet needs no JSON
+	// escaping), so the document lands at targetSize even for tiny padLen — avoiding
+	// the integer-truncation-to-empty-pad that padLen*3/4 would hit for padLen 1–3.
+	targetSize := (2 + rng.Intn(3)) * 1024
+	if padLen := targetSize - len(data) - 12; padLen > 0 {
+		diff["_pad"] = randomBase64Exact(rng, padLen)
+		data, _ = json.Marshal(diff)
+	}
+	return data, findAuditNonceOffset(data)
+}
+
+func findAuditNonceOffset(data []byte) int {
+	marker := []byte(`"_nonce":"`)
 	idx := bytes.Index(data, marker)
 	if idx < 0 {
 		return -1
