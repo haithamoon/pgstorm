@@ -3,6 +3,7 @@ package workload
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand"
 
@@ -11,6 +12,14 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"pg-loadgen/config"
 )
+
+// errSkipped is returned by an op that intentionally did no database work — e.g.
+// the session/message ring was empty at cold start, so there was nothing to read,
+// update, delete, ack, or requeue. The worker treats it specially: it is NOT
+// counted as an executed op or observed in the latency histogram (which would
+// record a bogus ~0ms "success" and deflate percentiles / inflate throughput);
+// instead it is surfaced via metrics.RecordSkip.
+var errSkipped = errors.New("op skipped: empty ring")
 
 // DBPool is the subset of pgxpool.Pool used by oltpExecutor.
 // *pgxpool.Pool satisfies this interface.
@@ -163,7 +172,7 @@ func (e *oltpExecutor) doInsert(ctx context.Context) error {
 func (e *oltpExecutor) doReadSimple(ctx context.Context) error {
 	sessionID, ok := e.ring.Sample(e.rng)
 	if !ok {
-		return nil
+		return errSkipped
 	}
 
 	query := readSimpleSQL
@@ -193,7 +202,7 @@ func (e *oltpExecutor) doReadSimple(ctx context.Context) error {
 func (e *oltpExecutor) doReadJoin(ctx context.Context) error {
 	sessionID, ok := e.ring.Sample(e.rng)
 	if !ok {
-		return nil
+		return errSkipped
 	}
 
 	severity := severities[e.rng.Intn(len(severities))]
@@ -231,7 +240,7 @@ func (e *oltpExecutor) doReadJoin(ctx context.Context) error {
 func (e *oltpExecutor) doUpdate(ctx context.Context) error {
 	sessionID, ok := e.ring.Sample(e.rng)
 	if !ok {
-		return nil
+		return errSkipped
 	}
 
 	metadata := GetMutatedPayload(e.rng, 4, 8)
@@ -286,7 +295,7 @@ func (e *oltpExecutor) doUpdate(ctx context.Context) error {
 func (e *oltpExecutor) doDelete(ctx context.Context) error {
 	sessionID, ok := e.ring.Sample(e.rng)
 	if !ok {
-		return nil
+		return errSkipped
 	}
 
 	_, err := e.pool.Exec(ctx,
@@ -308,7 +317,7 @@ func (e *oltpExecutor) doDelete(ctx context.Context) error {
 func (e *oltpExecutor) doReadByIP(ctx context.Context) error {
 	sessionID, ok := e.ring.Sample(e.rng)
 	if !ok {
-		return nil
+		return errSkipped
 	}
 
 	// Derive a stable /24 from the session's first UUID byte (0–255 → third octet).

@@ -20,8 +20,7 @@ type Config struct {
 
 	DeleteBatchSize int
 
-	ThinkTimeMs      int
-	TargetRatePerSec int
+	ThinkTimeMs int
 
 	MetricsPort int
 
@@ -44,7 +43,6 @@ func Load() (*Config, error) {
 		MaxPayloadKB:           getEnvInt("MAX_PAYLOAD_KB", 16),
 		DeleteBatchSize:        getEnvInt("DELETE_BATCH_SIZE", 50),
 		ThinkTimeMs:            getEnvInt("THINK_TIME_MS", 0),
-		TargetRatePerSec:       getEnvInt("TARGET_RATE_PER_SEC", 0),
 		MetricsPort:            getEnvInt("METRICS_PORT", 9090),
 		RunDurationSecs:        getEnvInt("RUN_DURATION_SECS", 0),
 		SummaryIntervalSecs:    getEnvInt("SUMMARY_INTERVAL_SECS", 30),
@@ -58,10 +56,6 @@ func Load() (*Config, error) {
 
 	if cfg.MinPayloadKB > cfg.MaxPayloadKB {
 		return nil, fmt.Errorf("MIN_PAYLOAD_KB (%d) must not exceed MAX_PAYLOAD_KB (%d)", cfg.MinPayloadKB, cfg.MaxPayloadKB)
-	}
-
-	if cfg.TargetRatePerSec < 0 {
-		return nil, fmt.Errorf("TARGET_RATE_PER_SEC must be >= 0 (0 = unlimited), got %d", cfg.TargetRatePerSec)
 	}
 
 	for _, v := range []struct {

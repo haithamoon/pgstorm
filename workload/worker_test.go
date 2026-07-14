@@ -9,9 +9,22 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 	"pg-loadgen/config"
 	"pg-loadgen/db"
+	"pg-loadgen/metrics"
 )
+
+// counterValue reads a Prometheus counter's current value without the (unvendored)
+// testutil package.
+func counterValue(c prometheus.Counter) float64 {
+	var m dto.Metric
+	if err := c.Write(&m); err != nil {
+		return 0
+	}
+	return m.GetCounter().GetValue()
+}
 
 var errBoom = errors.New("boom")
 
@@ -50,7 +63,7 @@ func TestRunWorker_executesAndExitsOnCancel(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		RunWorker(ctx, fakeProfile{count: &count}, []WeightedOp{{OpInsert, 100}}, cfg, nil, 0, ws)
+		RunWorker(ctx, fakeProfile{count: &count}, []WeightedOp{{OpInsert, 100}}, cfg, 0, ws)
 	}()
 
 	time.Sleep(30 * time.Millisecond)
@@ -78,7 +91,7 @@ func TestRunWorker_logsAndContinuesOnOpError(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		RunWorker(ctx, fakeProfile{count: &count, execErr: errBoom}, []WeightedOp{{OpInsert, 100}}, cfg, nil, 7, ws)
+		RunWorker(ctx, fakeProfile{count: &count, execErr: errBoom}, []WeightedOp{{OpInsert, 100}}, cfg, 7, ws)
 	}()
 	time.Sleep(20 * time.Millisecond)
 	cancel()
@@ -90,31 +103,33 @@ func TestRunWorker_logsAndContinuesOnOpError(t *testing.T) {
 	}
 }
 
-func TestRunWorker_honorsRateLimiter(t *testing.T) {
+// A ring-skip (errSkipped) must NOT be counted as an executed op or a ~0ms latency
+// sample; it is surfaced via ops_skipped_total instead.
+func TestRunWorker_skipsNotCountedAsOps(t *testing.T) {
 	var count int64
 	ws := newWorkerStats([]string{OpInsert})
 	cfg := &config.Config{}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	limiter := NewRateLimiter(ctx, 100) // ~100 ops/s
+	before := counterValue(metrics.OpsSkipped.WithLabelValues(OpInsert))
 
+	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		RunWorker(ctx, fakeProfile{count: &count}, []WeightedOp{{OpInsert, 100}}, cfg, limiter, 0, ws)
+		RunWorker(ctx, fakeProfile{count: &count, execErr: errSkipped}, []WeightedOp{{OpInsert, 100}}, cfg, 0, ws)
 	}()
-
-	time.Sleep(150 * time.Millisecond)
+	time.Sleep(20 * time.Millisecond)
 	cancel()
 	<-done
 
-	// At 100/s the feeder accrues ~15 tokens over 150ms (burst caps buffering at
-	// 10), so a correct limiter yields ~15-25. An unlimited worker would do many
-	// thousands. Upper bound 50 catches any ~2.5x+ throttling regression; because
-	// accrual is elapsed-time based, a slow/contended host yields *fewer* tokens,
-	// never more, so 50 cannot flake. Lower bound 3 is safely above the floor.
-	if n := atomic.LoadInt64(&count); n < 3 || n > 50 {
-		t.Errorf("rate-limited worker did %d ops in 150ms at 100/s; expected ~15-25 (bounds [3,50])", n)
+	if atomic.LoadInt64(&count) == 0 {
+		t.Fatal("executor never ran")
+	}
+	snap := ws.snapshot()
+	if snap[OpInsert].count != 0 || snap[OpInsert].errors != 0 {
+		t.Errorf("skip recorded as op: count=%d errors=%d (want 0/0)", snap[OpInsert].count, snap[OpInsert].errors)
+	}
+	if after := counterValue(metrics.OpsSkipped.WithLabelValues(OpInsert)); after <= before {
+		t.Errorf("ops_skipped_total not incremented: before=%v after=%v", before, after)
 	}
 }

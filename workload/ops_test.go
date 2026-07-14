@@ -3,6 +3,7 @@ package workload
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand"
 	"regexp"
@@ -184,8 +185,8 @@ func testConfig() *config.Config {
 }
 
 func TestExecute_emptyRing_skipsDB(t *testing.T) {
-	// For all ops except insert, an empty ring must return nil without
-	// touching the pool at all.
+	// For all ops except insert, an empty ring must skip (return errSkipped)
+	// without touching the pool at all.
 	ring := NewSessionRing(10)
 	cfg := testConfig()
 	rng := rand.New(rand.NewSource(1))
@@ -196,8 +197,8 @@ func TestExecute_emptyRing_skipsDB(t *testing.T) {
 
 	for _, op := range []string{OpReadSimple, OpReadJoin, OpUpdate, OpDelete, OpReadByIP} {
 		err := exec.Execute(ctx, op)
-		if err != nil {
-			t.Errorf("op=%s with empty ring: unexpected error %v", op, err)
+		if !errors.Is(err, errSkipped) {
+			t.Errorf("op=%s with empty ring: want errSkipped, got %v", op, err)
 		}
 	}
 }

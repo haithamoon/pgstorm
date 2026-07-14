@@ -12,18 +12,18 @@ A Go-based PostgreSQL load generator that stresses **heap I/O**, **Toast storage
 
 <!-- UPDATE THIS SECTION AT THE END OF EVERY SESSION -->
 
-**Last updated:** 2026-07-10
+**Last updated:** 2026-07-14
 **Active branch:** `main`
 
 ### In progress
 - **All of P0/P1/P2 are complete** (the last P2 item, "raise payload cardinality", was closed as won't-do — see `CODE-REVIEW.md` rationale). Comprehensive unit tests added and coverage verified (config 100%, workload 97.1%). **The only remaining work is P3** — `pgvector` and message-queue benchmark profiles — which is **blocked on a design decision** (which profile first) and would include the `workload/profiles/` subpackage reorg. Backlog detail in `CODE-REVIEW.md` (git-ignored); P3 design in `docs/rfc-workload-profiles.md`.
 
 ### Known open issues
-- None currently. (The old empty `metrics/wait_events.go` stub was deleted; wait-event logic lives in `pg_stats.go`.)
+- **Known limitation — closed-loop coordinated omission:** pgstorm is a closed-loop generator (a bounded pool of `WORKERS` goroutines, each blocking on its op before starting the next). During a server stall it issues *fewer* ops, so slow periods are under-sampled and reported p95/p99 skew optimistic. Running as many pods raises concurrency but does **not** remove this. Measurement-integrity fixes still pending (see `PLAN-2026-07-13.md` Tier 1): histogram-ceiling extension, ring-skip-as-op accounting, pool-acquire-wait visibility.
 
 ### Recently completed
 - **Test-coverage pass (2026-07-11):** added unit tests across the new/under-tested code — profile registry + OLTP accessors, weight resolution, `RunWorker`/`runOp` (fake profile), rate limiter, executor DB paths (mock pool/tx, happy + error + skip-locked), payload edges, config validation, `RecordOp`. config 100%, workload 97.1%; remaining gaps are DB-bound (integration/e2e-covered).
-- **Closed-loop rate limiting (2026-07-11, `0bdd495`):** `TARGET_RATE_PER_SEC` caps the per-replica op rate via a shared token-bucket `RateLimiter` (`workload/ratelimit.go`, elapsed-time accrual, 100ms burst); 0 = unlimited (default). Per-replica (N replicas → N× at the DB), warns if `THINK_TIME_MS` also set. Live-verified across 50/200/1000 ops/s.
+- **Removed closed-loop rate limiting (2026-07-14):** deleted `TARGET_RATE_PER_SEC` and the token-bucket `RateLimiter` (was `workload/ratelimit.go`, added `0bdd495`). Rationale: pgstorm runs as many pods, so aggregate DB load is dialed by replica count × `WORKERS`, and `THINK_TIME_MS` already covers light per-worker pacing — the per-pod token cap was redundant and gave only loose control of the true DB-side rate. Also resolved the top measurement-integrity finding (coordinated omission via the limiter + silent backlog drop). Trade-off: no precise fixed-rate runs; if ever needed it returns as an additive fix (intended-issue timing + rate-deficit metric). `THINK_TIME_MS` retained.
 - **Pluggable workload profiles (2026-07-10):** refactored the fixed schema + 6-op workload into a `Profile` interface + registry; current workload is the default `oltp-jsonb` profile, selected via `PROFILE`. Op weights now resolve generically (`workload.ResolveWeights`, sum==100); `db/schema.go` runs a profile's `db.Schema` DDL; table/index stat loops are parameterized by tracked tables. Behavior-preserving (unit tests green, live-PG e2e created 3 tables + 11 indexes with the correct op mix). As-built simplifications and the eventual `workload/profiles/` layout are documented in `docs/rfc-workload-profiles.md`.
 - **P2 small items (2026-07-10, `b9e62c9`):** `percentile()` now interpolates within the histogram bucket (Prometheus-style) instead of snapping to the upper bound; opt-in `READ_PAYLOAD` makes `read_simple`/`read_by_ip` detoast+read `events.payload` (query variants precomputed as constants); deleted the empty `metrics/wait_events.go` stub.
 - **P1 review fixes (2026-07-10):** removed dead `LOG_LEVEL` config (`5f20e69`); corrected the false "Toast deduplication" rationale in CLAUDE.md (`1c55240`); moved `ready.Store(true)` to after workers spawn so `/readyz` is honest (`a089d43`); balanced the `WorkersActive` gauge via `defer Dec()` in a new `runOp()` helper — deliberately no `recover()`, since a review confirmed it would mask systematic panics (`a089d43`); corrected the "no mutex on hot path" note (`b78939a`).
@@ -56,7 +56,6 @@ pgstorm/
 │   ├── payload.go            — two template pools (100 each); micro-mutation engine
 │   ├── ops.go                — oltp-jsonb's 6 DB operations (oltpExecutor)
 │   ├── worker.go             — RunWorker goroutine (drives a Profile); per-worker *rand.Rand
-│   ├── ratelimit.go          — shared token-bucket RateLimiter (TARGET_RATE_PER_SEC; nil = unlimited)
 │   └── stats.go              — per-worker stats; 30s rolling summary; fixed-bucket histograms
 └── metrics/
     ├── metrics.go            — OpsTotal (Counter), OpDuration (Histogram), WorkersActive (Gauge)
@@ -121,13 +120,12 @@ Coverage as of 2026-07-11: **config 100%, workload 97.1%, metrics 20.9%** (metri
 | `workload/stats.go` | Histogram bucket accumulation, p50/p95/p99 interpolation, snapshot reset |
 | `workload/weights.go` | `ResolveWeights` (env→weights, sum==100, negatives, malformed→default), `SelectOp` boundaries + fallthrough, `OpNames` |
 | `workload/profile.go` + `oltp.go` | registry get/unknown, `ProfileNames` sorted, OLTP ops-sum-100 / schema shape / Init builds ring |
-| `workload/worker.go` | `RunWorker` executes + records + exits on cancel, error-log path, rate-limiter honoured (via a fake Profile/Executor) |
-| `workload/ratelimit.go` | nil=unlimited, ctx-cancel unblocks, low-rate burst floor, rate is capped near target |
+| `workload/worker.go` | `RunWorker` executes + records + exits on cancel, error-log path (via a fake Profile/Executor) |
 | `workload/ops.go` | executor happy/rollback/skip-locked/error paths via mock pool+tx (Query/Exec/QueryRow) |
 | `config/config.go` | env-var defaults, `MIN>MAX` + negative-rate validation, `getEnv`/`getEnvInt`/`getEnvBool` |
 | `metrics/*` | delta trackers, PG14–17 version dispatch, pool collector (via `newPoolCollectorWith`), `RecordOp` ok/error counts |
 
-Use `go test -race ./...` — the ring buffer, stats structs, and rate-limiter have concurrent access patterns the race detector catches.
+Use `go test -race ./...` — the ring buffer and stats structs have concurrent access patterns the race detector catches.
 
 ### Integration tests (live Postgres required)
 Located in `db/`, opt in with `-tags integration`:
@@ -196,7 +194,6 @@ PG_DSN="postgres://user:pass@localhost:5432/mydb?sslmode=disable" WORKERS=5 ./pg
 | `CREATE_INDEXES` | false | Create 8 B-tree indexes (safe on live data) |
 | `RING_SIZE` | 10000 | Session UUID ring buffer capacity |
 | `DELETE_BATCH_SIZE` | 50 | Max events deleted per DELETE op |
-| `TARGET_RATE_PER_SEC` | 0 | Per-replica ops/sec cap (closed-loop, across the process's workers); 0 = unlimited; N replicas → N× at the DB. Shared token-bucket `RateLimiter` in `workload/ratelimit.go` |
 | `SCHEMA_POLL_MS` | 500 | Follower replica schema poll interval |
 | `METRICS_PORT` | 9090 | `/metrics`, `/healthz`, `/readyz` |
 | `SUMMARY_INTERVAL_SECS` | 30 | Stdout summary interval |

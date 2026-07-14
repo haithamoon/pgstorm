@@ -13,17 +13,21 @@ var testOps = []string{OpInsert, OpReadSimple, OpReadJoin, OpUpdate, OpDelete, O
 // ── WorkerStats.Record ───────────────────────────────────────────────────────
 
 func TestRecord_bucketPlacement(t *testing.T) {
-	// bucketBounds (ms): [1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500]
+	// bucketBounds (ms): [1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000]
 	tests := []struct {
 		durSec float64
 		bucket int // expected bucket index; -1 means inf
 	}{
 		{0.0005, 0}, // 0.5 ms → ≤ 1 ms → bucket 0
 		{0.001, 0},  // 1.0 ms → ≤ 1 ms → bucket 0
-		{0.003, 1},  // 3 ms   → ≤ 5 ms → bucket 1
-		{0.050, 4},  // 50 ms  → ≤ 50 ms → bucket 4
-		{0.100, 5},  // 100 ms → ≤ 100 ms → bucket 5
-		{10.0, -1},  // 10 s   → inf
+		{0.003, 1},  // 3 ms    → ≤ 5 ms → bucket 1
+		{0.050, 4},  // 50 ms   → ≤ 50 ms → bucket 4
+		{0.100, 5},  // 100 ms  → ≤ 100 ms → bucket 5
+		{5.0, 10},   // 5 s     → ≤ 5000 ms → bucket 10
+		{10.0, 11},  // 10 s    → ≤ 10000 ms → bucket 11
+		{30.0, 12},  // 30 s    → ≤ 30000 ms → bucket 12 (top)
+		{45.0, -1},  // 45 s    → > 30 s → inf
+		{60.0, -1},  // 60 s    → > 30 s → inf
 	}
 	for _, tc := range tests {
 		ws := newWorkerStats(testOps)
@@ -118,10 +122,10 @@ func TestPercentile_allInFirstBucket(t *testing.T) {
 
 func TestPercentile_allInInf(t *testing.T) {
 	s := &opStats{inf: 100}
-	// All observations exceed the highest bound (2500 ms), so the
-	// percentile function exhausts its buckets and returns 2500.
-	if p := percentile(s, 0.99); p != 2500 {
-		t.Errorf("p99 all-inf: want 2500, got %v", p)
+	// All observations exceed the highest bound (30000 ms), so the
+	// percentile function exhausts its buckets and returns 30000 (the ceiling).
+	if p := percentile(s, 0.99); p != 30000 {
+		t.Errorf("p99 all-inf: want 30000, got %v", p)
 	}
 }
 

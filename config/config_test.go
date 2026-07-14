@@ -62,25 +62,6 @@ func TestLoad_minPayloadEqualToMax(t *testing.T) {
 	}
 }
 
-func TestLoad_negativeTargetRate(t *testing.T) {
-	t.Setenv("TARGET_RATE_PER_SEC", "-1")
-	_, err := Load()
-	if err == nil || !strings.Contains(err.Error(), "TARGET_RATE_PER_SEC") {
-		t.Fatalf("want TARGET_RATE_PER_SEC error, got %v", err)
-	}
-}
-
-func TestLoad_zeroTargetRateIsValid(t *testing.T) {
-	t.Setenv("TARGET_RATE_PER_SEC", "0")
-	cfg, err := Load()
-	if err != nil {
-		t.Fatalf("TARGET_RATE_PER_SEC=0 should be valid (unlimited): %v", err)
-	}
-	if cfg.TargetRatePerSec != 0 {
-		t.Errorf("want 0, got %d", cfg.TargetRatePerSec)
-	}
-}
-
 func TestGetEnv_setAndUnset(t *testing.T) {
 	t.Setenv("TEST_STR_KEY", "custom")
 	if got := getEnv("TEST_STR_KEY", "def"); got != "custom" {
