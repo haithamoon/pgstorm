@@ -367,14 +367,16 @@ func TestExecute_update_lockAcquired_commits(t *testing.T) {
 	}
 }
 
-func TestExecute_update_skipLocked_returnsNilNoCommit(t *testing.T) {
+func TestExecute_update_skipLocked_returnsSkippedNoCommit(t *testing.T) {
 	ring := NewSessionRing(4)
 	ring.Push(uuid.New())
 	tx := &mockTx{queryRowErr: pgx.ErrNoRows} // row locked by another worker → skip
 	pool := &mockPool{beginTx: tx}
 	exec := newOLTPExecutor(pool, ring, testConfig(), rand.New(rand.NewSource(1)))
-	if err := exec.Execute(context.Background(), OpUpdate); err != nil {
-		t.Fatalf("skip-locked should return nil, got: %v", err)
+	// A SKIP LOCKED contention skip must be reported as errSkipped (not a bogus
+	// ~0ms success), so the worker excludes it from op/latency metrics.
+	if err := exec.Execute(context.Background(), OpUpdate); !errors.Is(err, errSkipped) {
+		t.Fatalf("skip-locked should return errSkipped, got: %v", err)
 	}
 	if tx.commitCalled {
 		t.Error("update must not commit when the lock was skipped")
