@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+// Copyright (C) 2026 Haitham Gadelrab
+// This program is free software under the GNU AGPL v3.0; see the LICENSE file.
+
 package metrics
 
 import (

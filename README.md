@@ -379,3 +379,11 @@ Health endpoints available on every replica:
 | `GET /healthz` | Liveness — returns 200 once the HTTP server is up |
 | `GET /readyz` | Readiness — returns 200 once workers have started |
 | `GET /metrics` | Prometheus metrics |
+
+---
+
+## License
+
+pgstorm is licensed under the **GNU Affero General Public License v3.0** (`AGPL-3.0-only`).
+
+Copyright (C) 2026 Haitham Gadelrab. See the [LICENSE](LICENSE) file for the full text.
