@@ -72,6 +72,35 @@ func TestLoad_zeroPayloadRejected(t *testing.T) {
 	}
 }
 
+func TestLoad_actorPoolDefaults(t *testing.T) {
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("defaults should be valid: %v", err)
+	}
+	if cfg.UserPoolSize != 10000 {
+		t.Errorf("UserPoolSize default: want 10000, got %d", cfg.UserPoolSize)
+	}
+	if cfg.ActorPoolSize != 100 {
+		t.Errorf("ActorPoolSize default: want 100, got %d", cfg.ActorPoolSize)
+	}
+}
+
+func TestLoad_zeroUserPoolSize(t *testing.T) {
+	t.Setenv("USER_POOL_SIZE", "0")
+	_, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "USER_POOL_SIZE") {
+		t.Fatalf("want USER_POOL_SIZE error for zero, got %v", err)
+	}
+}
+
+func TestLoad_zeroActorPoolSize(t *testing.T) {
+	t.Setenv("ACTOR_POOL_SIZE", "0")
+	_, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "ACTOR_POOL_SIZE") {
+		t.Fatalf("want ACTOR_POOL_SIZE error for zero, got %v", err)
+	}
+}
+
 func TestLoad_minPayloadEqualToMax(t *testing.T) {
 	// MIN == MAX is valid: buildTemplate calls rng.Intn(1) which returns 0 safely.
 	t.Setenv("MIN_PAYLOAD_KB", "8")

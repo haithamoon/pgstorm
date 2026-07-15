@@ -108,7 +108,7 @@ func (e *oltpExecutor) Execute(ctx context.Context, op string) error {
 
 func (e *oltpExecutor) doInsert(ctx context.Context) error {
 	sessionID := uuid.New()
-	userID := uuid.New()
+	userID := pickUser(e.rng)
 	region := regions[e.rng.Intn(len(regions))]
 	metadata := GetSessionPayload(e.rng)
 	numEvents := 1 + e.rng.Intn(3)
@@ -147,7 +147,7 @@ func (e *oltpExecutor) doInsert(ctx context.Context) error {
 	}
 
 	auditID := uuid.New()
-	changedBy := uuid.New()
+	changedBy := pickActor(e.rng)
 	diff := GetAuditDiff(e.rng)
 	checksum := fmt.Sprintf("%016x", e.rng.Int63())
 
@@ -275,7 +275,7 @@ func (e *oltpExecutor) doUpdate(ctx context.Context) error {
 	}
 
 	auditID := uuid.New()
-	changedBy := uuid.New()
+	changedBy := pickActor(e.rng)
 	diff := GetAuditDiff(e.rng)
 	checksum := fmt.Sprintf("%016x", e.rng.Int63())
 
@@ -360,4 +360,3 @@ func (e *oltpExecutor) doReadByIP(ctx context.Context) error {
 	}
 	return rows.Err()
 }
-
