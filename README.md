@@ -17,6 +17,7 @@ Most Postgres load generators just fire INSERTs. pgstorm is specifically designe
 - [Metrics Reference](#metrics-reference)
 - [What to Watch](#what-to-watch)
 - [Running Multiple Replicas](#running-multiple-replicas)
+- [License](#license)
 
 ---
 
@@ -248,7 +249,8 @@ All metrics are prefixed with `pgloadgen_`. The `/metrics` endpoint also exposes
 | Metric | Type | Labels | Description |
 |---|---|---|---|
 | `pgloadgen_ops_total` | Counter | `op`, `status` | Total operations completed; `status` is `ok` or `error` |
-| `pgloadgen_op_duration_seconds` | Histogram | `op` | Operation latency; buckets at 1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500 ms |
+| `pgloadgen_ops_skipped_total` | Counter | `op` | Operations that did **no** database work and were skipped — cold-start empty ring, or `FOR UPDATE SKIP LOCKED` contention. Tracked separately so they don't count as ~0 ms successes and distort latency/throughput |
+| `pgloadgen_op_duration_seconds` | Histogram | `op` | Operation latency; buckets at 1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000 ms |
 | `pgloadgen_workers_active` | Gauge | — | Number of operations currently in flight |
 
 ### Connection Pool
