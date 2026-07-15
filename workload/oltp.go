@@ -46,6 +46,7 @@ func (p *OLTPProfile) Init(cfg *config.Config, pool *pgxpool.Pool) error {
 	p.pool = pool
 	p.ring = NewSessionRing(cfg.RingSize)
 	InitEventPool(cfg.MinPayloadKB, cfg.MaxPayloadKB)
+	InitActorPools(cfg.UserPoolSize, cfg.ActorPoolSize)
 	return nil
 }
 

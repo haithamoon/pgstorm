@@ -20,6 +20,9 @@ type Config struct {
 
 	DeleteBatchSize int
 
+	UserPoolSize  int
+	ActorPoolSize int
+
 	ThinkTimeMs int
 
 	MetricsPort int
@@ -42,6 +45,8 @@ func Load() (*Config, error) {
 		MinPayloadKB:           getEnvInt("MIN_PAYLOAD_KB", 8),
 		MaxPayloadKB:           getEnvInt("MAX_PAYLOAD_KB", 16),
 		DeleteBatchSize:        getEnvInt("DELETE_BATCH_SIZE", 50),
+		UserPoolSize:           getEnvInt("USER_POOL_SIZE", 10000),
+		ActorPoolSize:          getEnvInt("ACTOR_POOL_SIZE", 100),
 		ThinkTimeMs:            getEnvInt("THINK_TIME_MS", 0),
 		MetricsPort:            getEnvInt("METRICS_PORT", 9090),
 		RunDurationSecs:        getEnvInt("RUN_DURATION_SECS", 0),
@@ -72,6 +77,8 @@ func Load() (*Config, error) {
 		{"WORKERS", cfg.Workers, 1},
 		{"RING_SIZE", cfg.RingSize, 1},
 		{"DELETE_BATCH_SIZE", cfg.DeleteBatchSize, 1},
+		{"USER_POOL_SIZE", cfg.UserPoolSize, 1},
+		{"ACTOR_POOL_SIZE", cfg.ActorPoolSize, 1},
 		{"METRICS_PORT", cfg.MetricsPort, 1},
 		{"SUMMARY_INTERVAL_SECS", cfg.SummaryIntervalSecs, 1},
 		{"INDEX_STATS_INTERVAL_SECS", cfg.IndexStatsIntervalSecs, 1},

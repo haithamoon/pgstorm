@@ -194,6 +194,8 @@ PG_DSN="postgres://user:pass@localhost:5432/mydb?sslmode=disable" WORKERS=5 ./pg
 | `CREATE_INDEXES` | false | Create 8 B-tree indexes (safe on live data) |
 | `RING_SIZE` | 10000 | Session UUID ring buffer capacity |
 | `DELETE_BATCH_SIZE` | 50 | Max events deleted per DELETE op |
+| `USER_POOL_SIZE` | 10000 | Bounded pool for `sessions.user_id` (uniform pick per insert) → realistic 1:N user→session cardinality |
+| `ACTOR_POOL_SIZE` | 100 | Bounded pool for `audit_log.changed_by` (uniform pick per audit write) |
 | `SCHEMA_POLL_MS` | 500 | Follower replica schema poll interval |
 | `METRICS_PORT` | 9090 | `/metrics`, `/healthz`, `/readyz` |
 | `SUMMARY_INTERVAL_SECS` | 30 | Stdout summary interval |

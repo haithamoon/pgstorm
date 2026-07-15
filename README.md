@@ -223,6 +223,8 @@ capabilities (e.g. vector search, queue patterns) can be added as additional pro
 | `CREATE_INDEXES` | `false` | Create B-tree indexes on startup (safe to enable on existing data) |
 | `RING_SIZE` | `10000` | Capacity of the shared session UUID ring buffer |
 | `DELETE_BATCH_SIZE` | `50` | Maximum events deleted per DELETE operation |
+| `USER_POOL_SIZE` | `10000` | Bounded pool of distinct `sessions.user_id` owners (drawn uniformly per insert); gives realistic 1:N user→session cardinality instead of a unique user per row |
+| `ACTOR_POOL_SIZE` | `100` | Bounded pool of distinct `audit_log.changed_by` actors (drawn uniformly per audit write) |
 | `SCHEMA_POLL_MS` | `500` | How often follower replicas poll for schema readiness (ms) |
 
 ### Observability
