@@ -12,13 +12,15 @@ import (
 	"pg-loadgen/config"
 )
 
-// errSkipped is returned by an op that intentionally did no database work — e.g.
-// the session/message ring was empty at cold start, so there was nothing to read,
-// update, delete, ack, or requeue. The worker treats it specially: it is NOT
+// errSkipped is returned by an op that intentionally did no database work. Two
+// causes: (1) the session/message ring was empty at cold start, so there was
+// nothing to read, update, delete, ack, or requeue; and (2) a session targeted
+// for UPDATE was locked by another worker, so FOR UPDATE SKIP LOCKED returned no
+// row (steady-state lock contention). The worker treats it specially: it is NOT
 // counted as an executed op or observed in the latency histogram (which would
 // record a bogus ~0ms "success" and deflate percentiles / inflate throughput);
 // instead it is surfaced via metrics.RecordSkip.
-var errSkipped = errors.New("op skipped: empty ring")
+var errSkipped = errors.New("op skipped: no database work")
 
 // DBPool is the subset of pgxpool.Pool used by oltpExecutor.
 // *pgxpool.Pool satisfies this interface.
@@ -256,9 +258,10 @@ func (e *oltpExecutor) doUpdate(ctx context.Context) error {
 		sessionID,
 	).Scan(&lockedID)
 	if err == pgx.ErrNoRows {
-		// Session is locked by another worker; skip silently.
-		// The deferred Rollback handles cleanup.
-		return nil
+		// Session is locked by another worker (FOR UPDATE SKIP LOCKED returned no
+		// row): the op did no database work, so skip it rather than record a bogus
+		// ~0ms "success". The deferred Rollback handles cleanup.
+		return errSkipped
 	}
 	if err != nil {
 		return fmt.Errorf("lock session: %w", err)
