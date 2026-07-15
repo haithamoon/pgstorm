@@ -158,8 +158,8 @@ func TestGetEventPayload_returnsValidJSON(t *testing.T) {
 // the event pool for a large range and confirm event payloads clearly exceed the
 // session pool's 8 KB ceiling while session payloads do not.
 func TestGetEventPayload_honorsConfiguredRange(t *testing.T) {
-	InitEventPool(32, 64)              // large configured range
-	defer InitEventPool(8, 16)         // restore for other tests (run sequentially)
+	InitEventPool(32, 64)      // large configured range
+	defer InitEventPool(8, 16) // restore for other tests (run sequentially)
 
 	rng := rand.New(rand.NewSource(7))
 
@@ -182,5 +182,81 @@ func TestGetEventPayload_honorsConfiguredRange(t *testing.T) {
 	}
 	if maxSession > 16*1024 {
 		t.Errorf("session payload should stay in the fixed 4–8 KB pool, got %d bytes", maxSession)
+	}
+}
+
+// toastSplit is a size threshold that cleanly separates small inline payloads
+// (session/event ≲1.4 KB, audit ≲1.2 KB) from large TOASTing ones (session ≥4 KB,
+// event ≥8 KB, audit ≥~1.9 KB). Used only by the TOAST_PCT tests.
+const toastSplit = 1600
+
+func TestToastPct_allLargeAt100(t *testing.T) {
+	SetToastPct(100)
+	defer SetToastPct(100)
+	rng := rand.New(rand.NewSource(1))
+	for i := 0; i < 300; i++ {
+		if n := len(GetSessionPayload(rng)); n <= toastSplit {
+			t.Fatalf("TOAST_PCT=100 session: want large (>%d), got %d", toastSplit, n)
+		}
+		if n := len(GetEventPayload(rng)); n <= toastSplit {
+			t.Fatalf("TOAST_PCT=100 event: want large (>%d), got %d", toastSplit, n)
+		}
+		if n := len(GetAuditDiff(rng)); n <= toastSplit {
+			t.Fatalf("TOAST_PCT=100 audit: want large (>%d), got %d", toastSplit, n)
+		}
+	}
+}
+
+func TestToastPct_allSmallAt0(t *testing.T) {
+	SetToastPct(0)
+	defer SetToastPct(100)
+	rng := rand.New(rand.NewSource(2))
+	for i := 0; i < 300; i++ {
+		if n := len(GetSessionPayload(rng)); n >= toastSplit {
+			t.Fatalf("TOAST_PCT=0 session: want small (<%d), got %d", toastSplit, n)
+		}
+		if n := len(GetEventPayload(rng)); n >= toastSplit {
+			t.Fatalf("TOAST_PCT=0 event: want small (<%d), got %d", toastSplit, n)
+		}
+		if n := len(GetAuditDiff(rng)); n >= toastSplit {
+			t.Fatalf("TOAST_PCT=0 audit: want small (<%d), got %d", toastSplit, n)
+		}
+	}
+}
+
+func TestToastPct_mixAt50(t *testing.T) {
+	SetToastPct(50)
+	defer SetToastPct(100)
+	rng := rand.New(rand.NewSource(3))
+	var big, small int
+	for i := 0; i < 500; i++ {
+		if len(GetEventPayload(rng)) >= toastSplit {
+			big++
+		} else {
+			small++
+		}
+	}
+	if big == 0 || small == 0 {
+		t.Fatalf("TOAST_PCT=50: want both large and small over 500 samples, got big=%d small=%d", big, small)
+	}
+}
+
+func TestToastPct_smallValuesValidAndUnique(t *testing.T) {
+	SetToastPct(0)
+	defer SetToastPct(100)
+	rng := rand.New(rand.NewSource(4))
+	for _, get := range []func(*rand.Rand) []byte{GetEventPayload, GetAuditDiff} {
+		seen := make(map[string]bool, 200)
+		for i := 0; i < 200; i++ {
+			v := get(rng)
+			if !json.Valid(v) {
+				t.Fatal("small value is not valid JSON")
+			}
+			s := string(v)
+			if seen[s] {
+				t.Fatalf("iteration %d: small value byte-identical to an earlier one", i)
+			}
+			seen[s] = true
+		}
 	}
 }
