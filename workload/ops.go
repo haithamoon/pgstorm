@@ -56,12 +56,12 @@ const (
 	readByIPSQL = `SELECT id, session_id, event_type, occurred_at, severity, trace_id
 		 FROM events
 		 WHERE source_ip >= $1::inet AND source_ip <= $2::inet
-		 ORDER BY occurred_at DESC
+		 ORDER BY source_ip
 		 LIMIT 50`
 	readByIPWithPayloadSQL = `SELECT id, session_id, event_type, occurred_at, severity, trace_id, payload
 		 FROM events
 		 WHERE source_ip >= $1::inet AND source_ip <= $2::inet
-		 ORDER BY occurred_at DESC
+		 ORDER BY source_ip
 		 LIMIT 50`
 )
 
@@ -320,8 +320,13 @@ func (e *oltpExecutor) doReadByIP(ctx context.Context) error {
 	}
 
 	// Derive a stable /24 from the session's first UUID byte (0–255 → third octet).
-	// Same session always maps to the same subnet, so results are consistent and
-	// the query is a plain range scan that a B-tree index on source_ip can satisfy.
+	// Same session always maps to the same subnet, so results are consistent and the
+	// query is a plain source_ip range scan. Ordering by source_ip (the range key)
+	// means idx_events_source_ip can serve both the filter and the order with no Sort
+	// node — a true B-tree range scan when CREATE_INDEXES=true. Without that index the
+	// planner falls back to a seq scan + range filter (index creation is opt-in and
+	// unchanged here). Ordering by any non-key column (e.g. occurred_at) would force a
+	// Sort the index can't satisfy, turning this into a sort-dominated op instead.
 	octet := int(sessionID[0])
 	lo := fmt.Sprintf("192.168.%d.0", octet)
 	hi := fmt.Sprintf("192.168.%d.255", octet)
@@ -331,8 +336,7 @@ func (e *oltpExecutor) doReadByIP(ctx context.Context) error {
 	// unspecified-type, so PostgreSQL infers inet from context and the query works
 	// across every pgx exec mode (verified on PG16) — but the casts document intent
 	// and guard against a driver/mode change silently turning $1 into text (which
-	// has no `inet >= text` operator). This stays a B-tree range scan that
-	// idx_events_source_ip can satisfy.
+	// has no `inet >= text` operator).
 	query := readByIPSQL
 	if e.cfg.ReadPayload {
 		query = readByIPWithPayloadSQL
