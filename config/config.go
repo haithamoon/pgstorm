@@ -17,6 +17,7 @@ type Config struct {
 
 	MinPayloadKB int
 	MaxPayloadKB int
+	ToastPct     int
 
 	DeleteBatchSize int
 
@@ -44,6 +45,7 @@ func Load() (*Config, error) {
 		RingSize:               getEnvInt("RING_SIZE", 10000),
 		MinPayloadKB:           getEnvInt("MIN_PAYLOAD_KB", 8),
 		MaxPayloadKB:           getEnvInt("MAX_PAYLOAD_KB", 16),
+		ToastPct:               getEnvInt("TOAST_PCT", 20),
 		DeleteBatchSize:        getEnvInt("DELETE_BATCH_SIZE", 50),
 		UserPoolSize:           getEnvInt("USER_POOL_SIZE", 10000),
 		ActorPoolSize:          getEnvInt("ACTOR_POOL_SIZE", 100),
@@ -67,6 +69,9 @@ func Load() (*Config, error) {
 	}
 	if cfg.MinPayloadKB > cfg.MaxPayloadKB {
 		return nil, fmt.Errorf("MIN_PAYLOAD_KB (%d) must not exceed MAX_PAYLOAD_KB (%d)", cfg.MinPayloadKB, cfg.MaxPayloadKB)
+	}
+	if cfg.ToastPct < 0 || cfg.ToastPct > 100 {
+		return nil, fmt.Errorf("TOAST_PCT must be between 0 and 100, got %d", cfg.ToastPct)
 	}
 
 	for _, v := range []struct {

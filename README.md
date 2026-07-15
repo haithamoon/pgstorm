@@ -114,7 +114,7 @@ Every JSONB value contains realistic-looking fields: HTTP request and response h
 | `events` | `payload` | `MIN_PAYLOAD_KB`–`MAX_PAYLOAD_KB` (default 8–16 KB) |
 | `audit_log` | `diff` | 2–4 KB (fixed) |
 
-All three JSONB values exceed Postgres's ~2 KB Toast threshold on every write, so every insert and update exercises out-of-line Toast storage.
+A configurable share of writes (`TOAST_PCT`, default 20%) produce **large** JSONB values that exceed Postgres's ~2 KB Toast threshold and store out-of-line; the rest are **small** (<2 KB) and stay inline. This mirrors a realistic mixed workload rather than forcing every row to TOAST. Set `TOAST_PCT=100` to make every write TOAST (the previous always-out-of-line behavior), or `TOAST_PCT=0` for all-inline.
 
 ---
 
@@ -213,7 +213,8 @@ capabilities (e.g. vector search, queue patterns) can be added as additional pro
 | Variable | Default | Description |
 |---|---|---|
 | `MIN_PAYLOAD_KB` | `8` | Minimum `events.payload` size in KB |
-| `MAX_PAYLOAD_KB` | `16` | Maximum `events.payload` size in KB |
+| `MAX_PAYLOAD_KB` | `16` | Maximum `events.payload` size in KB (large writes only) |
+| `TOAST_PCT` | `20` | Percentage of writes whose JSONB payload is large enough to TOAST (store out-of-line); the rest stay small/inline. `100` = always TOAST (legacy), `0` = always inline. Applies to `events.payload`, `sessions.metadata`, `audit_log.diff` |
 | `READ_PAYLOAD` | `false` | Include `events.payload` in `read_simple` / `read_by_ip` so those reads detoast and transfer the JSONB, exercising TOAST *reads* (by default only `read_join` reads the payload) |
 
 ### Schema

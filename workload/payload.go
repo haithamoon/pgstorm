@@ -21,7 +21,29 @@ var (
 	eventTraceIDOffsets   [templatePoolSize]int
 	auditTemplatePool     [templatePoolSize][]byte
 	auditNonceOffsets     [templatePoolSize]int
+
+	// Small (<2 KB) inline variants. When a write is chosen to be "small" (see
+	// toastPct), the value is drawn from these pools instead of the large ones, so it
+	// stays inline in the heap rather than TOASTing. smallPayloadPool serves both
+	// sessions.metadata and events.payload (both are just a small inline JSON body);
+	// smallAuditPool serves audit_log.diff.
+	smallPayloadPool    [templatePoolSize][]byte
+	smallPayloadOffsets [templatePoolSize]int
+	smallAuditPool      [templatePoolSize][]byte
+	smallAuditOffsets   [templatePoolSize]int
 )
+
+// toastPct is the percentage of writes whose JSONB payload is large enough to store
+// out-of-line (TOAST). The rest are small and stay inline. It defaults to 100 —
+// legacy always-TOAST — so any code path (e.g. a unit test) that calls a Get*
+// accessor without initializing the profile keeps the old behavior; production sets
+// it from TOAST_PCT via SetToastPct in OLTPProfile.Init.
+var toastPct = 100
+
+// SetToastPct sets the large-payload (TOAST) percentage. Called once from
+// OLTPProfile.Init after config is loaded, before workers start. Callers must pass a
+// value in [0,100] (config validates this).
+func SetToastPct(pct int) { toastPct = pct }
 
 func init() {
 	for i := 0; i < templatePoolSize; i++ {
@@ -30,6 +52,13 @@ func init() {
 
 		arng := rand.New(rand.NewSource(int64(i + 2*templatePoolSize)))
 		auditTemplatePool[i], auditNonceOffsets[i] = buildAuditTemplate(arng)
+
+		// Small inline variants (config-independent, so built here at init).
+		srng := rand.New(rand.NewSource(int64(i + 3*templatePoolSize)))
+		smallPayloadPool[i], smallPayloadOffsets[i] = buildSmallPayloadTemplate(srng)
+
+		sarng := rand.New(rand.NewSource(int64(i + 4*templatePoolSize)))
+		smallAuditPool[i], smallAuditOffsets[i] = buildSmallAuditTemplate(sarng)
 	}
 }
 
@@ -42,27 +71,41 @@ func InitEventPool(minKB, maxKB int) {
 	}
 }
 
-// GetSessionPayload returns a mutated copy of a session-metadata template,
-// always drawn from the fixed 4–8 KB session pool. Use for sessions.metadata.
+// isLarge rolls whether this write should produce a large (TOASTing) payload.
+// toastPct=100 → always true (legacy), toastPct=0 → always false.
+func isLarge(rng *rand.Rand) bool { return rng.Intn(100) < toastPct }
+
+// GetSessionPayload returns a mutated session-metadata value. With probability
+// toastPct it's large (fixed 4–8 KB pool, TOASTs); otherwise a small inline value.
+// Use for sessions.metadata.
 func GetSessionPayload(rng *rand.Rand) []byte {
-	return mutatedPayload(rng, &sessionTemplatePool, &sessionTraceIDOffsets)
+	if isLarge(rng) {
+		return mutatedPayload(rng, &sessionTemplatePool, &sessionTraceIDOffsets)
+	}
+	return mutatedPayload(rng, &smallPayloadPool, &smallPayloadOffsets)
 }
 
-// GetEventPayload returns a mutated copy of an event template, always drawn from
-// the configured event pool (sized by MIN/MAX_PAYLOAD_KB via InitEventPool). Use
-// for events.payload. Pool selection is by field, not by size, so the configured
-// range is always honored — even when MIN_PAYLOAD_KB <= 4.
+// GetEventPayload returns a mutated events.payload value. With probability toastPct
+// it's large (the configured MIN/MAX_PAYLOAD_KB event pool, TOASTs); otherwise a
+// small inline value. Large-pool selection is by field, not by size, so the
+// configured range is always honored — even when MIN_PAYLOAD_KB <= 4.
 func GetEventPayload(rng *rand.Rand) []byte {
-	return mutatedPayload(rng, &eventTemplatePool, &eventTraceIDOffsets)
+	if isLarge(rng) {
+		return mutatedPayload(rng, &eventTemplatePool, &eventTraceIDOffsets)
+	}
+	return mutatedPayload(rng, &smallPayloadPool, &smallPayloadOffsets)
 }
 
-// GetAuditDiff returns a mutated copy of an audit_log.diff template (2–4 KB, with
-// an incompressible base64 pad so it stays above the ~2 KB TOAST threshold and
-// stores out-of-line). The 16-hex _nonce is rewritten per call so each written
-// value is byte-unique — no json.Marshal or entropy generation on the hot path
-// (that happens once per template at init). Use for audit_log.diff.
+// GetAuditDiff returns a mutated audit_log.diff value. With probability toastPct it's
+// large (2–4 KB, incompressible base64 pad → stays above the ~2 KB TOAST threshold
+// and stores out-of-line); otherwise a small inline diff. The 16-hex mutable field
+// is rewritten per call so each written value is byte-unique — no json.Marshal or
+// entropy generation on the hot path (that happens once per template at init).
 func GetAuditDiff(rng *rand.Rand) []byte {
-	return mutatedPayload(rng, &auditTemplatePool, &auditNonceOffsets)
+	if isLarge(rng) {
+		return mutatedPayload(rng, &auditTemplatePool, &auditNonceOffsets)
+	}
+	return mutatedPayload(rng, &smallAuditPool, &smallAuditOffsets)
 }
 
 // mutatedPayload copies a random template from the given pool and rewrites its
@@ -173,6 +216,44 @@ func findAuditNonceOffset(data []byte) int {
 		return -1
 	}
 	return idx + len(marker)
+}
+
+// buildSmallPayloadTemplate builds one small (~0.3–1.4 KB) inline payload template
+// for the not-TOAST case, returning it with the offset of its mutable trace_id.
+// Deliberately compact — comfortably under the ~2 KB TOAST threshold — and no
+// incompressible pad (small values stay inline regardless, so no need to defeat
+// compression). Still byte-unique per write via the mutated trace_id.
+func buildSmallPayloadTemplate(rng *rand.Rand) ([]byte, int) {
+	methods := []string{"GET", "POST", "PUT", "DELETE", "PATCH"}
+	paths := []string{"/api/v2/users", "/api/v2/sessions", "/api/v2/events"}
+	// 128–896 random bytes → base64 ~170–1200 chars; with the small fixed fields the
+	// document lands well under 2 KB.
+	bodyBytes := 128 + rng.Intn(769)
+	payload := map[string]interface{}{
+		"method":   methods[rng.Intn(len(methods))],
+		"path":     paths[rng.Intn(len(paths))],
+		"status":   []int{200, 201, 400, 404, 500}[rng.Intn(5)],
+		"tags":     []string{randomString(rng, 5, 20), randomString(rng, 5, 20), randomString(rng, 5, 20)},
+		"body":     randomBase64(rng, bodyBytes),
+		"trace_id": fmt.Sprintf("%016x%016x", rng.Int63(), rng.Int63()),
+	}
+	data, _ := json.Marshal(payload)
+	return data, findTraceIDOffset(data)
+}
+
+// buildSmallAuditTemplate builds one small (~0.4–1.1 KB) inline audit_log.diff
+// template for the not-TOAST case, returning it with the offset of its mutable
+// _nonce. Like buildSmallPayloadTemplate: compact, no incompressible pad, byte-unique.
+func buildSmallAuditTemplate(rng *rand.Rand) ([]byte, int) {
+	diff := map[string]interface{}{
+		"_nonce":         fmt.Sprintf("%016x", rng.Int63()),
+		"before":         map[string]interface{}{"status": "active", "metadata": randomString(rng, 50, 100)},
+		"after":          map[string]interface{}{"status": "closed", "metadata": randomString(rng, 50, 100)},
+		"changed_fields": []string{"status", "metadata"},
+		"context":        randomBase64(rng, 128+rng.Intn(513)),
+	}
+	data, _ := json.Marshal(diff)
+	return data, findAuditNonceOffset(data)
 }
 
 func buildRequest(rng *rand.Rand, bodyKB int) map[string]interface{} {

@@ -72,6 +72,36 @@ func TestLoad_zeroPayloadRejected(t *testing.T) {
 	}
 }
 
+func TestLoad_toastPctDefault(t *testing.T) {
+	t.Setenv("TOAST_PCT", "")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("default TOAST_PCT should be valid: %v", err)
+	}
+	if cfg.ToastPct != 20 {
+		t.Errorf("ToastPct default: want 20, got %d", cfg.ToastPct)
+	}
+}
+
+func TestLoad_toastPctBoundsValid(t *testing.T) {
+	for _, v := range []string{"0", "100", "50"} {
+		t.Setenv("TOAST_PCT", v)
+		if _, err := Load(); err != nil {
+			t.Errorf("TOAST_PCT=%s should be valid: %v", v, err)
+		}
+	}
+}
+
+func TestLoad_toastPctOutOfRangeRejected(t *testing.T) {
+	for _, v := range []string{"-1", "101"} {
+		t.Setenv("TOAST_PCT", v)
+		_, err := Load()
+		if err == nil || !strings.Contains(err.Error(), "TOAST_PCT") {
+			t.Fatalf("want TOAST_PCT error for %s, got %v", v, err)
+		}
+	}
+}
+
 func TestLoad_actorPoolDefaults(t *testing.T) {
 	cfg, err := Load()
 	if err != nil {
