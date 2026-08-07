@@ -32,6 +32,11 @@ type Config struct {
 
 	MetricsPort int
 
+	// ResultJSONPath is where the end-of-run result document is written. Empty
+	// (the default) disables it, so the feature is strictly opt-in and a plain
+	// `docker compose up` behaves exactly as before.
+	ResultJSONPath string
+
 	RunDurationSecs        int
 	SummaryIntervalSecs    int
 	IndexStatsIntervalSecs int
@@ -60,6 +65,7 @@ func Load() (*Config, error) {
 		IndexStatsIntervalSecs: getEnvInt("INDEX_STATS_INTERVAL_SECS", 30),
 		ShutdownTimeoutSecs:    getEnvInt("SHUTDOWN_TIMEOUT_SECS", 5),
 		SchemaPollMs:           getEnvInt("SCHEMA_POLL_MS", 500),
+		ResultJSONPath:         getEnv("RESULT_JSON_PATH", ""),
 	}
 
 	// Op-mix weights are validated per-profile by workload.ResolveWeights, since
