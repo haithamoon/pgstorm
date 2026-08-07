@@ -4,6 +4,10 @@ A Go-based PostgreSQL load generator that hammers a database with a realistic mi
 
 Most Postgres load generators just fire INSERTs. pgstorm is specifically designed to exercise the parts of Postgres that matter most in production: autovacuum lag, Toast fragmentation, WAL amplification, and checkpoint pressure. Each replica exposes a Prometheus `/metrics` endpoint so you can observe everything in real time.
 
+![pgstorm Grafana dashboard showing throughput, latency percentiles, table and dead-tuple growth, WAL rates, checkpoint activity and wait events](docs/images/dashboard.png)
+
+The bundled Grafana dashboard, auto-provisioned by `docker compose up`. Client-side throughput and latency sit alongside the server-side internals — WAL bytes and full-page images, live vs dead tuples, checkpoint write/sync timing, buffer writes and wait events — so cause and effect land on the same timeline.
+
 **Supported Postgres versions:** 14, 15, 16, 17
 
 ---
