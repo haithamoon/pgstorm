@@ -42,7 +42,7 @@
   "timepicker": {},
   "timezone": "browser",
   "title": "pgstorm",
-  "uid": "pg-loadgen-dashboard",
+  "uid": "pgstorm-dashboard",
   "version": 1,
   "panels": [
 
