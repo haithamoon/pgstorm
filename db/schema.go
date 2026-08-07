@@ -10,8 +10,8 @@ import (
 	"log"
 	"time"
 
+	"github.com/haithamoon/pgstorm/config"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"pg-loadgen/config"
 )
 
 const advisoryLockID = 7654321

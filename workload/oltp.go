@@ -7,9 +7,9 @@ package workload
 import (
 	"math/rand"
 
+	"github.com/haithamoon/pgstorm/config"
+	"github.com/haithamoon/pgstorm/db"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"pg-loadgen/config"
-	"pg-loadgen/db"
 )
 
 // ProfileOLTP is the default profile: a mixed INSERT/READ/JOIN/UPDATE/DELETE

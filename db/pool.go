@@ -8,8 +8,8 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/haithamoon/pgstorm/config"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"pg-loadgen/config"
 )
 
 func NewPool(ctx context.Context, cfg *config.Config) (*pgxpool.Pool, error) {

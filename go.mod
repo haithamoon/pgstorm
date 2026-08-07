@@ -1,4 +1,4 @@
-module pg-loadgen
+module github.com/haithamoon/pgstorm
 
 go 1.25.0
 

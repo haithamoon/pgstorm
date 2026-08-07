@@ -15,9 +15,9 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/haithamoon/pgstorm/config"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
-	"pg-loadgen/config"
 )
 
 // ── pure helper tests ────────────────────────────────────────────────────────

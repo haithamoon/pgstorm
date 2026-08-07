@@ -6,13 +6,13 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o pg-loadgen .
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o pgstorm .
 
 FROM scratch
 
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
-COPY --from=builder /app/pg-loadgen /pg-loadgen
+COPY --from=builder /app/pgstorm /pgstorm
 
 EXPOSE 9090
 
-ENTRYPOINT ["/pg-loadgen"]
+ENTRYPOINT ["/pgstorm"]

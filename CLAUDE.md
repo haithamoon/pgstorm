@@ -22,10 +22,11 @@ A Go-based PostgreSQL load generator that stresses **heap I/O**, **Toast storage
 - **Known limitation — closed-loop coordinated omission:** pgstorm is a closed-loop generator (a bounded pool of `WORKERS` goroutines, each blocking on its op before starting the next). During a server stall it issues *fewer* ops, so slow periods are under-sampled and reported p95/p99 skew optimistic. Running as many pods raises concurrency but does **not** remove this. Measurement-integrity fixes still pending (see `PLAN-2026-07-13.md` Tier 1): histogram-ceiling extension, ring-skip-as-op accounting, pool-acquire-wait visibility.
 
 ### Deferred enhancements
-- **Skip-reason labeling:** `pgloadgen_ops_skipped_total` currently counts all skips the same. Empty-ring skips (cold-start artifact) and `FOR UPDATE SKIP LOCKED` skips (real UPDATE lock contention) are worth distinguishing — a reason label or separate counter would make lock-contention frequency visible as its own signal. Deferred; not needed for correctness.
+- **Skip-reason labeling:** `pgstorm_ops_skipped_total` currently counts all skips the same. Empty-ring skips (cold-start artifact) and `FOR UPDATE SKIP LOCKED` skips (real UPDATE lock contention) are worth distinguishing — a reason label or separate counter would make lock-contention frequency visible as its own signal. Deferred; not needed for correctness.
 
 ### Recently completed
-- **Fixed broken quickstart (2026-08-07, HAI-6):** `README.md` told users to run `go build ./...` then `./pgstorm`, which never produced a binary — `go build ./...` only compile-checks and discards executables for multi-package builds, and the module is `pg-loadgen`, so even `go build .` would emit the wrong name. README and the CLAUDE.md "Against existing Postgres" block now use `go build -o pgstorm .`; added `pgstorm` to `.gitignore` (the built binary was previously untracked, since only `pg-loadgen` was ignored). Deliberately left the *other* `go build ./...` occurrences alone — in `CLAUDE.md` "Build and vet", `.github/workflows/ci.yml`, and `pg-loadgen-plan.md` they are correct compile-check usage, not the bug. **Note the wider naming split is still open** (module `pg-loadgen`, repo `pgstorm`, metrics prefix `pgloadgen_`, Dockerfile binary `pg-loadgen`); unifying it is a separate breaking change since the metric prefix is load-bearing for dashboards and PromQL.
+- **Unified naming under `pgstorm` (2026-08-07, HAI-7) — BREAKING for metrics:** the project was named four different ways; it is now `pgstorm` throughout. Go module is `github.com/haithamoon/pgstorm` (fully-qualified, so it is `go get`-able) — 20 imports across 11 files, and `gofmt` reordering was required because the path moved from bare to domain-qualified. Metric namespace `metrics/metrics.go` `const namespace` is now `pgstorm`, which renames **all 18 metrics** `pgloadgen_*` → `pgstorm_*`; any dashboard, alert, or recording rule outside this repo that queried the old prefix is now silently dead. Also renamed: Dockerfile binary, Prometheus `job_name`, Grafana provider name, and both dashboards' title/tags/description. **Deliberately preserved: the Grafana dashboard uid is still `pg-loadgen-dashboard`** — uids are opaque and changing one breaks every bookmarked link, so it stays despite the stale-looking name; do not "fix" it. **Deliberately NOT renamed: `loadgen` as a Postgres credential** (`POSTGRES_USER`/`POSTGRES_PASSWORD`, all DSNs, `pg_isready -U loadgen`) — it is baked into existing `./pgdata` volumes and renaming it makes Postgres fail to start on existing local data. The Compose service is likewise still `loadgen`, coupled to Prometheus `dns_sd_configs: names: ['loadgen']` — those two must always move together. `pg-loadgen-plan.md` is left untouched as a point-in-time record.
+- **Fixed broken quickstart (2026-08-07, HAI-6):** `README.md` told users to run `go build ./...` then `./pgstorm`, which never produced a binary — `go build ./...` only compile-checks and discards executables for multi-package builds, and the module is `pg-loadgen`, so even `go build .` would emit the wrong name. README and the CLAUDE.md "Against existing Postgres" block now use `go build -o pgstorm .`; added `pgstorm` to `.gitignore` (the built binary was previously untracked, since only `pg-loadgen` was ignored). Deliberately left the *other* `go build ./...` occurrences alone — in `CLAUDE.md` "Build and vet", `.github/workflows/ci.yml`, and `pg-loadgen-plan.md` they are correct compile-check usage, not the bug. The wider naming split this exposed (module `pg-loadgen` vs repo `pgstorm` vs metric prefix `pgloadgen_`) was closed separately by HAI-7, below.
 - **Test-coverage pass (2026-07-11):** added unit tests across the new/under-tested code — profile registry + OLTP accessors, weight resolution, `RunWorker`/`runOp` (fake profile), rate limiter, executor DB paths (mock pool/tx, happy + error + skip-locked), payload edges, config validation, `RecordOp`. config 100%, workload 97.1%; remaining gaps are DB-bound (integration/e2e-covered).
 - **Removed closed-loop rate limiting (2026-07-14):** deleted `TARGET_RATE_PER_SEC` and the token-bucket `RateLimiter` (was `workload/ratelimit.go`, added `0bdd495`). Rationale: pgstorm runs as many pods, so aggregate DB load is dialed by replica count × `WORKERS`, and `THINK_TIME_MS` already covers light per-worker pacing — the per-pod token cap was redundant and gave only loose control of the true DB-side rate. Also resolved the top measurement-integrity finding (coordinated omission via the limiter + silent backlog drop). Trade-off: no precise fixed-rate runs; if ever needed it returns as an additive fix (intended-issue timing + rate-deficit metric). `THINK_TIME_MS` retained.
 - **Pluggable workload profiles (2026-07-10):** refactored the fixed schema + 6-op workload into a `Profile` interface + registry; current workload is the default `oltp-jsonb` profile, selected via `PROFILE`. Op weights now resolve generically (`workload.ResolveWeights`, sum==100); `db/schema.go` runs a profile's `db.Schema` DDL; table/index stat loops are parameterized by tracked tables. Behavior-preserving (unit tests green, live-PG e2e created 3 tables + 11 indexes with the correct op mix). As-built simplifications and the eventual `workload/profiles/` layout are documented in `docs/rfc-workload-profiles.md`.
@@ -37,7 +38,7 @@ A Go-based PostgreSQL load generator that stresses **heap I/O**, **Toast storage
   - **P0 #3** (`162e22e`): `read_by_ip` inet comparison — verified NOT a bug (uncast query works across all pgx v5 exec modes on live PG16). Kept explicit `$1::inet`/`$2::inet` casts as defensive hardening.
 - Prometheus + Grafana added to Docker Compose (`monitoring/` directory); dashboards auto-provisioned on startup
 - `postgres_exporter` (v0.16.0) sidecar added; separate PostgreSQL Grafana dashboard provisioned
-- Wait Event analysis: `pgloadgen_wait_events_active` GaugeVec in `metrics/pg_stats.go`; polls `pg_stat_activity WHERE wait_event IS NOT NULL`; `Reset()` each tick; shares `INDEX_STATS_INTERVAL_SECS` tick
+- Wait Event analysis: `pgstorm_wait_events_active` GaugeVec in `metrics/pg_stats.go`; polls `pg_stat_activity WHERE wait_event IS NOT NULL`; `Reset()` each tick; shares `INDEX_STATS_INTERVAL_SECS` tick
 - Stop hook added to `.claude/settings.json` — reminds to update CLAUDE.md when uncommitted changes exist
 - Loadgen scaled to 2 replicas × 2 workers; host port mapping removed; Prometheus discovers replicas via Docker DNS service discovery (see P0 #1)
 
@@ -224,24 +225,24 @@ PG_DSN="postgres://user:pass@localhost:5432/mydb?sslmode=disable" WORKERS=5 ./pg
 
 | Metric | Type | Condition | Notes |
 |--------|------|-----------|-------|
-| `pgloadgen_ops_total` | Counter | always | labels: op, status |
-| `pgloadgen_op_duration_seconds` | Histogram | always | labels: op |
-| `pgloadgen_workers_active` | Gauge | always | ops in flight |
-| `pgloadgen_pool_acquired_conns` | Gauge | always | custom Collector |
-| `pgloadgen_pool_idle_conns` | Gauge | always | |
-| `pgloadgen_pool_total_conns` | Gauge | always | |
-| `pgloadgen_pool_max_conns` | Gauge | always | |
-| `pgloadgen_table_size_bytes` | Gauge | always | labels: table |
-| `pgloadgen_table_live_tuples` | Gauge | always | |
-| `pgloadgen_table_dead_tuples` | Gauge | always | |
-| `pgloadgen_table_mod_since_analyze` | Gauge | always | |
-| `pgloadgen_table_autovacuum_total` | Counter | always | delta-tracked |
-| `pgloadgen_table_autoanalyze_total` | Counter | always | delta-tracked |
-| `pgloadgen_wait_events_active` | Gauge | always | labels: wait_event_type, wait_event; Reset() each tick |
-| `pgloadgen_index_size_bytes` | Gauge | CREATE_INDEXES=true | labels: index, table |
-| `pgloadgen_index_scans_total` | Counter | CREATE_INDEXES=true | delta-tracked |
-| `pgloadgen_bgwriter_*` | Counter | always | delta-tracked; PG14–17 via version detection |
-| `pgloadgen_wal_*` | Counter | always | delta-tracked; PG14+ |
+| `pgstorm_ops_total` | Counter | always | labels: op, status |
+| `pgstorm_op_duration_seconds` | Histogram | always | labels: op |
+| `pgstorm_workers_active` | Gauge | always | ops in flight |
+| `pgstorm_pool_acquired_conns` | Gauge | always | custom Collector |
+| `pgstorm_pool_idle_conns` | Gauge | always | |
+| `pgstorm_pool_total_conns` | Gauge | always | |
+| `pgstorm_pool_max_conns` | Gauge | always | |
+| `pgstorm_table_size_bytes` | Gauge | always | labels: table |
+| `pgstorm_table_live_tuples` | Gauge | always | |
+| `pgstorm_table_dead_tuples` | Gauge | always | |
+| `pgstorm_table_mod_since_analyze` | Gauge | always | |
+| `pgstorm_table_autovacuum_total` | Counter | always | delta-tracked |
+| `pgstorm_table_autoanalyze_total` | Counter | always | delta-tracked |
+| `pgstorm_wait_events_active` | Gauge | always | labels: wait_event_type, wait_event; Reset() each tick |
+| `pgstorm_index_size_bytes` | Gauge | CREATE_INDEXES=true | labels: index, table |
+| `pgstorm_index_scans_total` | Counter | CREATE_INDEXES=true | delta-tracked |
+| `pgstorm_bgwriter_*` | Counter | always | delta-tracked; PG14–17 via version detection |
+| `pgstorm_wal_*` | Counter | always | delta-tracked; PG14+ |
 
 ---
 

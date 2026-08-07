@@ -12,12 +12,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/haithamoon/pgstorm/config"
+	"github.com/haithamoon/pgstorm/db"
+	"github.com/haithamoon/pgstorm/metrics"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
-	"pg-loadgen/config"
-	"pg-loadgen/db"
-	"pg-loadgen/metrics"
 )
 
 // counterValue reads a Prometheus counter's current value without the (unvendored)

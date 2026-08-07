@@ -11,8 +11,8 @@ import (
 	"math/rand"
 	"time"
 
-	"pg-loadgen/config"
-	"pg-loadgen/metrics"
+	"github.com/haithamoon/pgstorm/config"
+	"github.com/haithamoon/pgstorm/metrics"
 )
 
 // RunWorker runs one worker goroutine: build a per-worker executor from the

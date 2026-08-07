@@ -3,7 +3,7 @@ global:
   evaluation_interval: 15s
 
 scrape_configs:
-  - job_name: pg-loadgen
+  - job_name: pgstorm
     # Docker Compose's embedded DNS returns one A record per running replica of
     # the `loadgen` service, so this discovers every replica automatically —
     # no hardcoded container names, and it survives `--scale loadgen=N`.

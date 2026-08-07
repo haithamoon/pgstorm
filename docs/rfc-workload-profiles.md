@@ -164,7 +164,7 @@ pgstorm/
 
 - **Large but mostly mechanical.** ~15 files touched; the bulk is *moving* three files
   into a subpackage. The only genuinely new logic is the `Profile` interface + weight
-  resolver. Import paths change (`pg-loadgen/workload` → `.../workload/profiles/oltpjsonb`).
+  resolver. Import paths change (`github.com/haithamoon/pgstorm/workload` → `.../workload/profiles/oltpjsonb`).
 - **Highest-risk edit:** the config op-pct generalization (removing 6 fields, moving
   validation). Mitigated by keeping identical env-var names/defaults and asserting sum==100
   in `runner/weights.go` with a focused test.

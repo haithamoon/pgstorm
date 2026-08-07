@@ -11,9 +11,9 @@ import (
 	"math/rand"
 
 	"github.com/google/uuid"
+	"github.com/haithamoon/pgstorm/config"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
-	"pg-loadgen/config"
 )
 
 // errSkipped is returned by an op that intentionally did no database work. Two

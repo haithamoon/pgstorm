@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/haithamoon/pgstorm/config"
+	"github.com/haithamoon/pgstorm/db"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"pg-loadgen/config"
-	"pg-loadgen/db"
 )
 
 // testSchema is a minimal three-table schema (FK-ordered) that exercises the
