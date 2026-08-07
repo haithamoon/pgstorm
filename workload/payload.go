@@ -1,6 +1,6 @@
-// SPDX-License-Identifier: AGPL-3.0-only
+// SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Haitham Gadelrab
-// This program is free software under the GNU AGPL v3.0; see the LICENSE file.
+// Licensed under the Apache License, Version 2.0; see the LICENSE file.
 
 package workload
 

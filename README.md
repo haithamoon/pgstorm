@@ -386,6 +386,8 @@ Health endpoints available on every replica:
 
 ## License
 
-pgstorm is licensed under the **GNU Affero General Public License v3.0** (`AGPL-3.0-only`).
+pgstorm is licensed under the **Apache License 2.0** (`Apache-2.0`).
 
 Copyright (C) 2026 Haitham Gadelrab. See the [LICENSE](LICENSE) file for the full text.
+
+Apache-2.0 was chosen deliberately: a benchmark is only useful if the people being benchmarked can run it. Permissive licensing means managed-Postgres vendors and companies with policies against copyleft can use pgstorm and publish results without legal review.
