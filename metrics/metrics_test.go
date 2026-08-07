@@ -23,6 +23,14 @@ func counterValue(t *testing.T, c prometheus.Counter) float64 {
 
 func TestRecordOp_countsOkAndError(t *testing.T) {
 	const op = "unit_test_op" // a label unused elsewhere, so counts start at 0
+
+	// OpsTotal is a package-global collector, so its series survive between test
+	// runs in the same process. Drop just this op's series (not a full Reset,
+	// which would clobber other tests) so the assertions below hold under
+	// -count>1 as well as a single run.
+	OpsTotal.DeleteLabelValues(op, "ok")
+	OpsTotal.DeleteLabelValues(op, "error")
+
 	RecordOp(op, 0.010, nil)
 	RecordOp(op, 0.020, nil)
 	RecordOp(op, 0.030, fmt.Errorf("boom"))

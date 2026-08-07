@@ -7,6 +7,8 @@ package workload
 import (
 	"context"
 	"fmt"
+	"math"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -14,18 +16,24 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// bucketBounds are upper bounds in milliseconds, matching the Prometheus histogram.
-// A fixed array (not a slice) so numBuckets is a compile-time constant derived from it,
-// keeping the buckets array size below in lockstep with the bounds.
-var bucketBounds = [...]float64{1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000}
-
-const numBuckets = len(bucketBounds)
-
+// opStats accumulates one op's stats for the current summary window.
+//
+// Latencies are kept as an exact frequency map (microseconds → count) rather
+// than a fixed-bucket histogram. A bucketed histogram has to assume
+// observations are spread uniformly inside each bucket, which is wrong for
+// right-skewed latency data, and it cannot represent anything above its top
+// bound at all — the old implementation reported every value over 30 s as
+// exactly 30000 ms. The map is exact at both ends, which is a prerequisite for
+// publishing run results.
+//
+// Memory is bounded by the number of *distinct* latencies seen in one window,
+// and snapshot() resets it every SUMMARY_INTERVAL_SECS, so it does not grow
+// over the life of a run. The Prometheus histogram in metrics/ is unaffected
+// and stays bucketed — that is the correct model for a time series.
 type opStats struct {
-	count   int64
-	errors  int64
-	buckets [numBuckets]int64 // counts per latency bucket
-	inf     int64             // observations above the highest bucket
+	count     int64
+	errors    int64
+	latencies map[int64]int64 // latency in microseconds → number of observations
 }
 
 // WorkerStats holds one worker's window stats. Owned by the worker goroutine;
@@ -52,21 +60,28 @@ func (ws *WorkerStats) Record(op string, durationSec float64, err error) {
 	if err != nil {
 		s.errors++
 	}
-	ms := durationSec * 1000
-	placed := false
-	for i, bound := range bucketBounds {
-		if ms <= bound {
-			s.buckets[i]++
-			placed = true
-			break
-		}
+	// Lazily allocated: snapshot() hands the previous map off to the collector
+	// and leaves a nil one behind, so ops that see no traffic in a window cost
+	// no allocation.
+	if s.latencies == nil {
+		s.latencies = make(map[int64]int64)
 	}
-	if !placed {
-		s.inf++
+	us := int64(durationSec * 1e6)
+	if us < 0 {
+		// A monotonic clock cannot produce this, but a negative value would sort
+		// below every real observation and drag the percentiles down, so pin it.
+		us = 0
 	}
+	s.latencies[us]++
 }
 
 // snapshot atomically copies and resets the window data.
+//
+// The struct copy carries the latencies map header, so the returned snapshot
+// takes sole ownership of that map and zeroing the original leaves a nil map
+// behind for Record to re-create. Caller and worker therefore never share a
+// map — do not "optimise" this into a shallow copy that keeps the reference on
+// both sides, or the collector would read a map the worker is still writing.
 func (ws *WorkerStats) snapshot() map[string]opStats {
 	ws.mu.Lock()
 	defer ws.mu.Unlock()
@@ -131,9 +146,11 @@ func (c *StatsCollector) print(now time.Time, window time.Duration, pool *pgxpoo
 			m := merged[op]
 			m.count += s.count
 			m.errors += s.errors
-			m.inf += s.inf
-			for i := range s.buckets {
-				m.buckets[i] += s.buckets[i]
+			for us, n := range s.latencies {
+				if m.latencies == nil {
+					m.latencies = make(map[int64]int64, len(s.latencies))
+				}
+				m.latencies[us] += n
 			}
 		}
 	}
@@ -174,45 +191,46 @@ func (c *StatsCollector) print(now time.Time, window time.Duration, pool *pgxpoo
 	fmt.Printf("%s\n\n", sep)
 }
 
-// percentile estimates a percentile value (q in 0–1) from the fixed-bucket
-// histogram using linear interpolation within the bucket that contains the
-// target rank — the same approach as Prometheus's histogram_quantile. Each
-// bucket i spans (lo, hi] where hi = bucketBounds[i] and lo = bucketBounds[i-1]
-// (lo = 0 for the first bucket); observations are assumed uniform within it, so
-// the estimate lands between the bounds rather than snapping to the upper edge.
+// percentile returns the exact q-th percentile (q in 0–1) in milliseconds,
+// using the nearest-rank definition: the smallest observed value v such that at
+// least ceil(q*N) of the N observations are ≤ v. Because every observation is
+// retained, the result is a real measured latency rather than an estimate — no
+// interpolation, and no ceiling to clamp against.
+//
+// Returns 0 for an empty window.
 func percentile(s *opStats, q float64) float64 {
-	total := s.inf
-	for _, b := range s.buckets {
-		total += b
+	var total int64
+	for _, n := range s.latencies {
+		total += n
 	}
 	if total == 0 {
 		return 0
 	}
-	target := q * float64(total)
-	var cum float64
-	for i, b := range s.buckets {
-		if b == 0 {
-			continue
-		}
-		if cum+float64(b) >= target {
-			lo := 0.0
-			if i > 0 {
-				lo = bucketBounds[i-1]
-			}
-			hi := bucketBounds[i]
-			frac := (target - cum) / float64(b)
-			if frac < 0 {
-				frac = 0
-			} else if frac > 1 {
-				frac = 1
-			}
-			return lo + (hi-lo)*frac
-		}
-		cum += float64(b)
+
+	rank := int64(math.Ceil(q * float64(total)))
+	if rank < 1 {
+		rank = 1 // q ≤ 0 → the minimum observation
+	} else if rank > total {
+		rank = total // q ≥ 1 → the maximum observation
 	}
-	// Target falls in the +Inf overflow bucket (> the highest finite bound):
-	// there is no upper edge to interpolate to, so report that bound as a floor.
-	return bucketBounds[numBuckets-1]
+
+	keys := make([]int64, 0, len(s.latencies))
+	for us := range s.latencies {
+		keys = append(keys, us)
+	}
+	slices.Sort(keys)
+
+	// Walk every key but the last. If the rank is not reached by then, the
+	// remaining observations are all at the largest latency, so that is the
+	// answer — which also keeps this function free of an unreachable branch.
+	var cum int64
+	for _, us := range keys[:len(keys)-1] {
+		cum += s.latencies[us]
+		if cum >= rank {
+			return float64(us) / 1000 // µs → ms
+		}
+	}
+	return float64(keys[len(keys)-1]) / 1000
 }
 
 func commaf(n int64) string {

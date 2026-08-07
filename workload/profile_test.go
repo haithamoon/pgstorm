@@ -71,6 +71,13 @@ func TestOLTPProfile_Schema(t *testing.T) {
 }
 
 func TestOLTPProfile_InitBuildsRingAndExecutor(t *testing.T) {
+	// Init calls SetToastPct, which is package-global. cfg leaves ToastPct at its
+	// zero value, so without this restore the whole package is left at "never
+	// TOAST" and later payload-size tests see small inline values instead of the
+	// 2–4 KB they assert on. Only visible under -count>1, where the leak carries
+	// into the next iteration. Same convention as payload_test.go.
+	defer SetToastPct(100)
+
 	p := &OLTPProfile{}
 	cfg := &config.Config{RingSize: 16, MinPayloadKB: 8, MaxPayloadKB: 16}
 	// Init does not touch the pool, so a nil pool is fine for this unit test.
