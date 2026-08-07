@@ -19,6 +19,7 @@ The bundled Grafana dashboard, auto-provisioned by `docker compose up`. Client-s
 - [How It Works](#how-it-works)
 - [Schema](#schema)
 - [Configuration](#configuration)
+- [Run results](#run-results)
 - [Metrics Reference](#metrics-reference)
 - [What to Watch](#what-to-watch)
 - [Running Multiple Replicas](#running-multiple-replicas)
@@ -265,8 +266,56 @@ capabilities (e.g. vector search, queue patterns) can be added as additional pro
 |---|---|---|
 | `METRICS_PORT` | `9090` | Port the Go process listens on for `/metrics`, `/healthz`, `/readyz` |
 | `SUMMARY_INTERVAL_SECS` | `30` | How often to print the per-op summary to stdout |
+| `RESULT_JSON_PATH` | *(empty)* | Write a whole-run result document here when the run ends. Empty disables it. See [Run results](#run-results) |
 | `INDEX_STATS_INTERVAL_SECS` | `30` | How often to poll Postgres for table and index stats |
 | `SHUTDOWN_TIMEOUT_SECS` | `5` | Grace period for the HTTP server to drain on shutdown |
+
+---
+
+## Run results
+
+The stdout summary is per-window and discarded as it goes, so by default nothing about a run outlives the process. Set `RESULT_JSON_PATH` to write a single self-describing document when the run ends:
+
+```bash
+RUN_DURATION_SECS=900 RESULT_JSON_PATH=results/run.json docker compose up --build
+```
+
+It records the whole run — not the last window — alongside the settings that produced it, so a result stays interpretable after the fact and two runs can be compared field by field:
+
+```json
+{
+  "profile": "oltp-jsonb",
+  "started_at": "2026-08-07T22:51:41.696718Z",
+  "ended_at": "2026-08-07T22:52:01.704932Z",
+  "duration_seconds": 20.008396416,
+  "config": {
+    "workers": 4, "toast_pct": 20, "min_payload_kb": 8, "max_payload_kb": 16,
+    "op_weights": { "insert": 35, "read_join": 20, "read_simple": 15, "update": 15, "delete": 10, "read_by_ip": 5 }
+  },
+  "totals": { "ops": 6184, "errors": 4, "ops_per_sec": 309.07 },
+  "operations": [
+    {
+      "op": "delete",
+      "count": 636,
+      "errors": 1,
+      "ops_per_sec": 31.79,
+      "latency": {
+        "min_ms": 0.279, "mean_ms": 18.396, "p50_ms": 18.374,
+        "p95_ms": 20.836, "p99_ms": 24.34, "p999_ms": 36.583, "max_ms": 36.583
+      }
+    }
+  ]
+}
+```
+
+Latency figures are computed from every observation rather than from histogram buckets, so they are real measured values with no interpolation and no upper bound — a p99 of 45 s is reported as 45 s, not clipped.
+
+Notes:
+
+- **Opt-in.** Leave `RESULT_JSON_PATH` empty (the default) and nothing is written.
+- **One file per process.** Running `--scale loadgen=N` gives each replica its own view, so point each at a distinct path; the totals are per-replica, not cluster-wide.
+- **Written after the workers stop**, so it includes the trailing window since the last printed summary. A run shorter than one `SUMMARY_INTERVAL_SECS` prints nothing but still produces a complete result.
+- **Written atomically** via a temp file and rename, so a reader never sees a partial document. A write failure is logged and does not fail the run.
 
 ---
 

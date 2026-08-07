@@ -150,7 +150,24 @@ func main() {
 	}
 
 	wg.Wait()
-	log.Println("all workers stopped — goodbye")
+	log.Println("all workers stopped")
+
+	// Write the result only after every worker has returned, so Finalize picks
+	// up the trailing window since the last summary and nothing is still being
+	// recorded. A failure here must not change the exit path — the run itself
+	// already happened, and the console summaries were printed.
+	if cfg.ResultJSONPath != "" {
+		totals, started, ended := collector.Finalize()
+		result := workload.BuildRunResult(totals, started, ended, cfg, ops)
+		if err := workload.WriteRunResult(cfg.ResultJSONPath, result); err != nil {
+			log.Printf("write result json: %v", err)
+		} else {
+			log.Printf("wrote result json: %s (%d ops over %.0fs)",
+				cfg.ResultJSONPath, result.Totals.Ops, result.DurationSeconds)
+		}
+	}
+
+	log.Println("goodbye")
 
 	shutCtx, shutCancel := context.WithTimeout(context.Background(), time.Duration(cfg.ShutdownTimeoutSecs)*time.Second)
 	defer shutCancel()

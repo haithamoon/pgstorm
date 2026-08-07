@@ -99,10 +99,20 @@ type StatsCollector struct {
 	workers []*WorkerStats
 	start   time.Time
 	ops     []string // op names to track/print, from the active profile
+
+	// total accumulates every window and is never reset, so the whole run
+	// survives to be written out at the end. The per-window snapshot that
+	// drives the console summary is destructive, so without this nothing but
+	// scrollback outlives the process.
+	total map[string]*opStats
 }
 
 func NewStatsCollector(ops []string) *StatsCollector {
-	return &StatsCollector{start: time.Now(), ops: ops}
+	total := make(map[string]*opStats, len(ops))
+	for _, op := range ops {
+		total[op] = &opStats{}
+	}
+	return &StatsCollector{start: time.Now(), ops: ops, total: total}
 }
 
 // NewWorkerStats creates a WorkerStats registered with the collector.
@@ -129,31 +139,97 @@ func (c *StatsCollector) RunSummaryLoop(ctx context.Context, interval time.Durat
 	}
 }
 
-func (c *StatsCollector) print(now time.Time, window time.Duration, pool *pgxpool.Pool) {
-	c.mu.Lock()
-	workers := make([]*WorkerStats, len(c.workers))
-	copy(workers, c.workers)
-	c.mu.Unlock()
+// mergeInto adds src's counts and latency observations into dst.
+func mergeInto(dst, src *opStats) {
+	dst.count += src.count
+	dst.errors += src.errors
+	for us, n := range src.latencies {
+		if dst.latencies == nil {
+			dst.latencies = make(map[int64]int64, len(src.latencies))
+		}
+		dst.latencies[us] += n
+	}
+}
 
-	// Merge snapshots from all workers
+// drain snapshots every worker and merges the result into one map, additionally
+// folding it into the never-reset run total. This is the only place worker
+// windows are consumed, so every observation lands in the total exactly once.
+func (c *StatsCollector) drain() map[string]*opStats {
+	// Lifting the windows out of the workers and folding them into the total
+	// must be one atomic step. Releasing the lock in between allows a concurrent
+	// drain (the summary goroutine's last print racing main's Finalize, both
+	// woken by the same expiring context) to observe a total that is missing a
+	// window which has already been taken from the workers — silently dropping a
+	// whole summary interval from the result. Held across ws.snapshot(), which
+	// takes each worker's own lock; the order is always c.mu → ws.mu and Record
+	// only ever takes ws.mu, so there is no cycle.
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	merged := make(map[string]*opStats, len(c.ops))
 	for _, op := range c.ops {
 		merged[op] = &opStats{}
 	}
-	for _, ws := range workers {
-		snap := ws.snapshot()
-		for op, s := range snap {
-			m := merged[op]
-			m.count += s.count
-			m.errors += s.errors
-			for us, n := range s.latencies {
-				if m.latencies == nil {
-					m.latencies = make(map[int64]int64, len(s.latencies))
-				}
-				m.latencies[us] += n
+	for _, ws := range c.workers {
+		for op, s := range ws.snapshot() {
+			if m, ok := merged[op]; ok {
+				mergeInto(m, &s)
 			}
 		}
 	}
+	for op, m := range merged {
+		if t, ok := c.total[op]; ok {
+			mergeInto(t, m)
+		}
+	}
+	return merged
+}
+
+// Finalize consumes any window that has accumulated since the last summary and
+// returns the whole-run totals. Call it after all workers have stopped and the
+// summary loop has exited; calling it twice is safe but the second call adds
+// nothing.
+func (c *StatsCollector) Finalize() (totals map[string]opStats, started, ended time.Time) {
+	c.drain() // fold the trailing partial window into the total
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make(map[string]opStats, len(c.total))
+	for op, s := range c.total {
+		out[op] = *s
+	}
+	return out, c.start, time.Now()
+}
+
+// latencyStats derives the full latency summary in a single sort. Every value
+// is a real observation (or, for mean, an exact average of them) — nothing here
+// is interpolated or clamped.
+func (s *opStats) latencyStats() LatencyStats {
+	keys, total := s.sortedKeys()
+	if total == 0 {
+		return LatencyStats{}
+	}
+	var weightedSum int64
+	for _, us := range keys {
+		weightedSum += us * s.latencies[us]
+	}
+	return LatencyStats{
+		MinMS:  float64(keys[0]) / 1000,
+		MeanMS: float64(weightedSum) / float64(total) / 1000,
+		P50MS:  quantileFrom(s.latencies, keys, total, 0.50),
+		P95MS:  quantileFrom(s.latencies, keys, total, 0.95),
+		P99MS:  quantileFrom(s.latencies, keys, total, 0.99),
+		P999MS: quantileFrom(s.latencies, keys, total, 0.999),
+		MaxMS:  float64(keys[len(keys)-1]) / 1000,
+	}
+}
+
+func (c *StatsCollector) print(now time.Time, window time.Duration, pool *pgxpool.Pool) {
+	merged := c.drain()
+
+	c.mu.Lock()
+	workerCount := len(c.workers)
+	c.mu.Unlock()
 
 	windowSecs := window.Seconds()
 	elapsed := now.Sub(c.start).Round(time.Second)
@@ -186,7 +262,7 @@ func (c *StatsCollector) print(now time.Time, window time.Duration, pool *pgxpoo
 	if pool != nil {
 		stat := pool.Stat()
 		fmt.Printf("  pool  acquired=%d  idle=%d  total=%d  max=%d  │  workers=%d\n",
-			stat.AcquiredConns(), stat.IdleConns(), stat.TotalConns(), stat.MaxConns(), len(workers))
+			stat.AcquiredConns(), stat.IdleConns(), stat.TotalConns(), stat.MaxConns(), workerCount)
 	}
 	fmt.Printf("%s\n\n", sep)
 }
@@ -199,10 +275,26 @@ func (c *StatsCollector) print(now time.Time, window time.Duration, pool *pgxpoo
 //
 // Returns 0 for an empty window.
 func percentile(s *opStats, q float64) float64 {
+	keys, total := s.sortedKeys()
+	return quantileFrom(s.latencies, keys, total, q)
+}
+
+// sortedKeys returns the distinct latencies in ascending order plus the total
+// observation count, so callers that need several quantiles only sort once.
+func (s *opStats) sortedKeys() ([]int64, int64) {
+	keys := make([]int64, 0, len(s.latencies))
 	var total int64
-	for _, n := range s.latencies {
+	for us, n := range s.latencies {
+		keys = append(keys, us)
 		total += n
 	}
+	slices.Sort(keys)
+	return keys, total
+}
+
+// quantileFrom is the shared nearest-rank implementation. Kept separate so
+// percentile() and latencyStats() can never drift apart.
+func quantileFrom(latencies map[int64]int64, keys []int64, total int64, q float64) float64 {
 	if total == 0 {
 		return 0
 	}
@@ -214,18 +306,12 @@ func percentile(s *opStats, q float64) float64 {
 		rank = total // q ≥ 1 → the maximum observation
 	}
 
-	keys := make([]int64, 0, len(s.latencies))
-	for us := range s.latencies {
-		keys = append(keys, us)
-	}
-	slices.Sort(keys)
-
 	// Walk every key but the last. If the rank is not reached by then, the
 	// remaining observations are all at the largest latency, so that is the
 	// answer — which also keeps this function free of an unreachable branch.
 	var cum int64
 	for _, us := range keys[:len(keys)-1] {
-		cum += s.latencies[us]
+		cum += latencies[us]
 		if cum >= rank {
 			return float64(us) / 1000 // µs → ms
 		}
