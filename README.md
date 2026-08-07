@@ -59,7 +59,7 @@ CREATE_INDEXES=true docker compose up --build
 To build and run locally against an existing Postgres instance:
 
 ```bash
-go build ./...
+go build -o pgstorm .
 PG_DSN="postgres://user:pass@localhost:5432/mydb?sslmode=disable" WORKERS=5 ./pgstorm
 ```
 

@@ -12,8 +12,8 @@ A Go-based PostgreSQL load generator that stresses **heap I/O**, **Toast storage
 
 <!-- UPDATE THIS SECTION AT THE END OF EVERY SESSION -->
 
-**Last updated:** 2026-07-14
-**Active branch:** `main`
+**Last updated:** 2026-08-07
+**Active branch:** `feature/hai-6-broken-quickstart-go-build-does-not-produce-pgstorm-binary`
 
 ### In progress
 - **All of P0/P1/P2 are complete** (the last P2 item, "raise payload cardinality", was closed as won't-do — see `CODE-REVIEW.md` rationale). Comprehensive unit tests added and coverage verified (config 100%, workload 97.1%). **The only remaining work is P3** — `pgvector` and message-queue benchmark profiles — which is **blocked on a design decision** (which profile first) and would include the `workload/profiles/` subpackage reorg. Backlog detail in `CODE-REVIEW.md` (git-ignored); P3 design in `docs/rfc-workload-profiles.md`.
@@ -25,6 +25,7 @@ A Go-based PostgreSQL load generator that stresses **heap I/O**, **Toast storage
 - **Skip-reason labeling:** `pgloadgen_ops_skipped_total` currently counts all skips the same. Empty-ring skips (cold-start artifact) and `FOR UPDATE SKIP LOCKED` skips (real UPDATE lock contention) are worth distinguishing — a reason label or separate counter would make lock-contention frequency visible as its own signal. Deferred; not needed for correctness.
 
 ### Recently completed
+- **Fixed broken quickstart (2026-08-07, HAI-6):** `README.md` told users to run `go build ./...` then `./pgstorm`, which never produced a binary — `go build ./...` only compile-checks and discards executables for multi-package builds, and the module is `pg-loadgen`, so even `go build .` would emit the wrong name. README and the CLAUDE.md "Against existing Postgres" block now use `go build -o pgstorm .`; added `pgstorm` to `.gitignore` (the built binary was previously untracked, since only `pg-loadgen` was ignored). Deliberately left the *other* `go build ./...` occurrences alone — in `CLAUDE.md` "Build and vet", `.github/workflows/ci.yml`, and `pg-loadgen-plan.md` they are correct compile-check usage, not the bug. **Note the wider naming split is still open** (module `pg-loadgen`, repo `pgstorm`, metrics prefix `pgloadgen_`, Dockerfile binary `pg-loadgen`); unifying it is a separate breaking change since the metric prefix is load-bearing for dashboards and PromQL.
 - **Test-coverage pass (2026-07-11):** added unit tests across the new/under-tested code — profile registry + OLTP accessors, weight resolution, `RunWorker`/`runOp` (fake profile), rate limiter, executor DB paths (mock pool/tx, happy + error + skip-locked), payload edges, config validation, `RecordOp`. config 100%, workload 97.1%; remaining gaps are DB-bound (integration/e2e-covered).
 - **Removed closed-loop rate limiting (2026-07-14):** deleted `TARGET_RATE_PER_SEC` and the token-bucket `RateLimiter` (was `workload/ratelimit.go`, added `0bdd495`). Rationale: pgstorm runs as many pods, so aggregate DB load is dialed by replica count × `WORKERS`, and `THINK_TIME_MS` already covers light per-worker pacing — the per-pod token cap was redundant and gave only loose control of the true DB-side rate. Also resolved the top measurement-integrity finding (coordinated omission via the limiter + silent backlog drop). Trade-off: no precise fixed-rate runs; if ever needed it returns as an additive fix (intended-issue timing + rate-deficit metric). `THINK_TIME_MS` retained.
 - **Pluggable workload profiles (2026-07-10):** refactored the fixed schema + 6-op workload into a `Profile` interface + registry; current workload is the default `oltp-jsonb` profile, selected via `PROFILE`. Op weights now resolve generically (`workload.ResolveWeights`, sum==100); `db/schema.go` runs a profile's `db.Schema` DDL; table/index stat loops are parameterized by tracked tables. Behavior-preserving (unit tests green, live-PG e2e created 3 tables + 11 indexes with the correct op mix). As-built simplifications and the eventual `workload/profiles/` layout are documented in `docs/rfc-workload-profiles.md`.
@@ -163,7 +164,9 @@ CREATE_INDEXES=true docker compose up --build
 # Multiple replicas
 docker compose up --build --scale loadgen=3
 
-# Against existing Postgres
+# Against existing Postgres (note: `go build ./...` above only compile-checks —
+# it does not write a binary, so build with -o explicitly)
+go build -o pgstorm .
 PG_DSN="postgres://user:pass@localhost:5432/mydb?sslmode=disable" WORKERS=5 ./pgstorm
 ```
 
