@@ -20,6 +20,8 @@ The bundled Grafana dashboard, auto-provisioned by `docker compose up`. Client-s
 - [Schema](#schema)
 - [Configuration](#configuration)
 - [Run results](#run-results)
+- [Methodology](#methodology)
+- [Limitations](#limitations)
 - [Metrics Reference](#metrics-reference)
 - [What to Watch](#what-to-watch)
 - [Running Multiple Replicas](#running-multiple-replicas)
@@ -310,12 +312,60 @@ It records the whole run — not the last window — alongside the settings that
 
 Latency figures are computed from every observation rather than from histogram buckets, so they are real measured values with no interpolation and no upper bound — a p99 of 45 s is reported as 45 s, not clipped.
 
+The document also brackets the run with the size of the tracked tables, because pgstorm grows the database as it runs:
+
+```json
+"dataset": {
+  "start": { "total_bytes": 1216348160, "live_tuples": 402118, "table_bytes": { "events": 903168000, "sessions": 221347840, "audit_log": 91832320 } },
+  "end":   { "total_bytes": 1522860032, "live_tuples": 498233, "table_bytes": { "events": 1132675072, "sessions": 275480576, "audit_log": 114704384 } },
+  "growth_bytes": 306511872
+}
+```
+
+Sizes come from `pg_total_relation_size`, so they include TOAST and index storage. Without them a result cannot be compared against another, because the two runs were not measuring the same database. The key is omitted entirely if the size could not be read, so a missing measurement never reads as an empty database.
+
 Notes:
 
 - **Opt-in.** Leave `RESULT_JSON_PATH` empty (the default) and nothing is written.
 - **One file per process.** Running `--scale loadgen=N` gives each replica its own view, so point each at a distinct path; the totals are per-replica, not cluster-wide.
 - **Written after the workers stop**, so it includes the trailing window since the last printed summary. A run shorter than one `SUMMARY_INTERVAL_SECS` prints nothing but still produces a complete result.
 - **Written atomically** via a temp file and rename, so a reader never sees a partial document. A write failure is logged and does not fail the run.
+
+---
+
+## Methodology
+
+If you intend to compare two pgstorm results, or publish one, these are the things that decide whether the comparison means anything.
+
+**Do not let the client be the bottleneck.** pgstorm and Postgres competing for the same cores measures your laptop, not your database. Run the generator on a separate machine, or check that it is not CPU-saturated. State what you ran it on.
+
+**Keep the network out of it.** Run in the same region — ideally the same availability zone — as the target. A few milliseconds of round-trip dominates operations that take single-digit milliseconds server-side, and the effect looks exactly like a slow database.
+
+**Report the dataset, not just the duration.** pgstorm starts from whatever is already there and grows as it runs, so two runs of the same length on different hardware end at different sizes. The `dataset` block in the result file exists for this; quote it.
+
+**Change one thing at a time.** The op mix, `TOAST_PCT`, payload sizes, `CREATE_INDEXES` and worker count all move the numbers substantially. The result file records them so a reader can tell what was actually compared.
+
+**Publish the untuned run too.** If you tuned Postgres, include a stock-configuration run alongside it. Tuned-only numbers are not interpretable, because the reader cannot tell how much came from the tuning.
+
+**Repeat the run.** A first run against a cold cache is not the same as a third against a warm one, and bloat accumulates across runs without a wipe. Report the spread rather than the best number — for pgstorm the spread is itself a finding.
+
+---
+
+## Limitations
+
+Stated plainly, because a benchmark whose weaknesses are hidden is worth less than one whose weaknesses are known.
+
+**Reported percentiles are optimistic under load.** pgstorm is a *closed-loop* generator: a fixed pool of workers each block on their operation before issuing the next. When the server stalls, pgstorm issues fewer operations, so the stall is under-sampled and p95/p99 look better than a user would experience. This is called coordinated omission. Adding replicas raises concurrency but does not remove it — only an open-loop generator that records intended issue time would. **Treat pgstorm's tail latencies as a lower bound.**
+
+**The workload is synthetic.** Payloads are generated JSON with incompressible bodies, sized to exercise TOAST. They resemble production data in shape and size, not in content or access distribution.
+
+**There is no think time by default.** Workers issue their next operation immediately (`THINK_TIME_MS=0`), which is a stress pattern, not a simulation of user behaviour.
+
+**Results are per-process.** Under `--scale loadgen=N` each replica writes its own result covering its own operations. There is no cluster-wide aggregation; the `dataset` block is the shared database and will look identical across replicas.
+
+**There is no scale factor.** Unlike `pgbench -s`, pgstorm has no way to preload to a target size, so the dataset is a by-product of run length and machine speed rather than something you set. This is the biggest obstacle to comparing results across machines and is why the `dataset` block matters.
+
+**No published result corpus exists yet.** There is nothing authoritative to compare your numbers against.
 
 ---
 
