@@ -36,7 +36,7 @@ The load generator starts immediately once Postgres is healthy. `docker compose 
 - **Grafana** — http://localhost:3000 (login `admin` / `admin`); dashboards are auto-provisioned
 - **Prometheus** — http://localhost:9091
 
-The `loadgen` replicas deliberately do **not** publish a host port — Prometheus scrapes them directly over the Compose network via Docker DNS service discovery. To confirm metrics are flowing, check that the `pg-loadgen` targets are `up`:
+The `loadgen` replicas deliberately do **not** publish a host port — Prometheus scrapes them directly over the Compose network via Docker DNS service discovery. To confirm metrics are flowing, check that the `pgstorm` targets are `up`:
 
 ```bash
 curl 'http://localhost:9091/api/v1/targets?state=active'
@@ -242,47 +242,47 @@ capabilities (e.g. vector search, queue patterns) can be added as additional pro
 
 ## Metrics Reference
 
-All metrics are prefixed with `pgloadgen_`. The `/metrics` endpoint also exposes Go runtime and process metrics from the default Prometheus registry.
+All metrics are prefixed with `pgstorm_`. The `/metrics` endpoint also exposes Go runtime and process metrics from the default Prometheus registry.
 
 ### Operation Metrics
 
 | Metric | Type | Labels | Description |
 |---|---|---|---|
-| `pgloadgen_ops_total` | Counter | `op`, `status` | Total operations completed; `status` is `ok` or `error` |
-| `pgloadgen_ops_skipped_total` | Counter | `op` | Operations that did **no** database work and were skipped — cold-start empty ring, or `FOR UPDATE SKIP LOCKED` contention. Tracked separately so they don't count as ~0 ms successes and distort latency/throughput |
-| `pgloadgen_op_duration_seconds` | Histogram | `op` | Operation latency; buckets at 1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000 ms |
-| `pgloadgen_workers_active` | Gauge | — | Number of operations currently in flight |
+| `pgstorm_ops_total` | Counter | `op`, `status` | Total operations completed; `status` is `ok` or `error` |
+| `pgstorm_ops_skipped_total` | Counter | `op` | Operations that did **no** database work and were skipped — cold-start empty ring, or `FOR UPDATE SKIP LOCKED` contention. Tracked separately so they don't count as ~0 ms successes and distort latency/throughput |
+| `pgstorm_op_duration_seconds` | Histogram | `op` | Operation latency; buckets at 1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000 ms |
+| `pgstorm_workers_active` | Gauge | — | Number of operations currently in flight |
 
 ### Connection Pool
 
 | Metric | Type | Description |
 |---|---|---|
-| `pgloadgen_pool_acquired_conns` | Gauge | Connections currently checked out by workers |
-| `pgloadgen_pool_idle_conns` | Gauge | Idle connections waiting in the pool |
-| `pgloadgen_pool_total_conns` | Gauge | Total open connections (acquired + idle) |
-| `pgloadgen_pool_max_conns` | Gauge | Pool capacity (`WORKERS + 5`) |
-| `pgloadgen_pool_acquire_count_total` | Counter | Cumulative successful connection acquisitions |
-| `pgloadgen_pool_empty_acquire_count_total` | Counter | Acquisitions that had to **wait** for a free connection — this wait is charged to op latency, so a rising value means client-side pool contention (not server slowness) |
-| `pgloadgen_pool_canceled_acquire_count_total` | Counter | Acquisitions cancelled by context before obtaining a connection |
-| `pgloadgen_pool_acquire_duration_seconds_total` | Counter | Cumulative time spent waiting to acquire a connection (seconds) |
+| `pgstorm_pool_acquired_conns` | Gauge | Connections currently checked out by workers |
+| `pgstorm_pool_idle_conns` | Gauge | Idle connections waiting in the pool |
+| `pgstorm_pool_total_conns` | Gauge | Total open connections (acquired + idle) |
+| `pgstorm_pool_max_conns` | Gauge | Pool capacity (`WORKERS + 5`) |
+| `pgstorm_pool_acquire_count_total` | Counter | Cumulative successful connection acquisitions |
+| `pgstorm_pool_empty_acquire_count_total` | Counter | Acquisitions that had to **wait** for a free connection — this wait is charged to op latency, so a rising value means client-side pool contention (not server slowness) |
+| `pgstorm_pool_canceled_acquire_count_total` | Counter | Acquisitions cancelled by context before obtaining a connection |
+| `pgstorm_pool_acquire_duration_seconds_total` | Counter | Cumulative time spent waiting to acquire a connection (seconds) |
 
 ### Table Stats *(always collected)*
 
 | Metric | Type | Labels | Description |
 |---|---|---|---|
-| `pgloadgen_table_size_bytes` | Gauge | `table` | Heap size in bytes (excludes Toast and indexes) |
-| `pgloadgen_table_live_tuples` | Gauge | `table` | Estimated live row count from `pg_stat_user_tables` |
-| `pgloadgen_table_dead_tuples` | Gauge | `table` | Estimated dead row count — proxy for MVCC bloat |
-| `pgloadgen_table_mod_since_analyze` | Gauge | `table` | Rows modified since last analyze; high value means stale planner stats |
-| `pgloadgen_table_autovacuum_total` | Counter | `table` | Autovacuum runs observed since pod start |
-| `pgloadgen_table_autoanalyze_total` | Counter | `table` | Autoanalyze runs observed since pod start |
+| `pgstorm_table_size_bytes` | Gauge | `table` | Heap size in bytes (excludes Toast and indexes) |
+| `pgstorm_table_live_tuples` | Gauge | `table` | Estimated live row count from `pg_stat_user_tables` |
+| `pgstorm_table_dead_tuples` | Gauge | `table` | Estimated dead row count — proxy for MVCC bloat |
+| `pgstorm_table_mod_since_analyze` | Gauge | `table` | Rows modified since last analyze; high value means stale planner stats |
+| `pgstorm_table_autovacuum_total` | Counter | `table` | Autovacuum runs observed since pod start |
+| `pgstorm_table_autoanalyze_total` | Counter | `table` | Autoanalyze runs observed since pod start |
 
 ### Index Stats *(only when `CREATE_INDEXES=true`)*
 
 | Metric | Type | Labels | Description |
 |---|---|---|---|
-| `pgloadgen_index_size_bytes` | Gauge | `index`, `table` | Index size in bytes |
-| `pgloadgen_index_scans_total` | Counter | `index`, `table` | Index scans observed since pod start |
+| `pgstorm_index_size_bytes` | Gauge | `index`, `table` | Index size in bytes |
+| `pgstorm_index_scans_total` | Counter | `index`, `table` | Index scans observed since pod start |
 
 All 11 indexes (8 explicit + 3 primary keys) are tracked automatically by querying `pg_stat_user_indexes` — no hardcoded index names.
 
@@ -292,22 +292,22 @@ Sourced from `pg_stat_bgwriter` on PG14–16 and split across `pg_stat_bgwriter`
 
 | Metric | Type | Description |
 |---|---|---|
-| `pgloadgen_bgwriter_checkpoints_timed_total` | Counter | Checkpoints triggered by `checkpoint_timeout` |
-| `pgloadgen_bgwriter_checkpoints_req_total` | Counter | Checkpoints triggered by WAL segment demand |
-| `pgloadgen_bgwriter_buffers_checkpoint_total` | Counter | Shared buffers written during checkpoints |
-| `pgloadgen_bgwriter_buffers_clean_total` | Counter | Shared buffers written by the background writer |
-| `pgloadgen_bgwriter_buffers_backend_total` | Counter | Shared buffers written directly by backends *(PG14–16 only)* |
-| `pgloadgen_bgwriter_checkpoint_write_seconds_total` | Counter | Time spent writing files during checkpoints |
-| `pgloadgen_bgwriter_checkpoint_sync_seconds_total` | Counter | Time spent syncing files during checkpoints |
+| `pgstorm_bgwriter_checkpoints_timed_total` | Counter | Checkpoints triggered by `checkpoint_timeout` |
+| `pgstorm_bgwriter_checkpoints_req_total` | Counter | Checkpoints triggered by WAL segment demand |
+| `pgstorm_bgwriter_buffers_checkpoint_total` | Counter | Shared buffers written during checkpoints |
+| `pgstorm_bgwriter_buffers_clean_total` | Counter | Shared buffers written by the background writer |
+| `pgstorm_bgwriter_buffers_backend_total` | Counter | Shared buffers written directly by backends *(PG14–16 only)* |
+| `pgstorm_bgwriter_checkpoint_write_seconds_total` | Counter | Time spent writing files during checkpoints |
+| `pgstorm_bgwriter_checkpoint_sync_seconds_total` | Counter | Time spent syncing files during checkpoints |
 
 ### WAL Stats *(PG14+ required)*
 
 | Metric | Type | Description |
 |---|---|---|
-| `pgloadgen_wal_bytes_total` | Counter | Total WAL bytes generated |
-| `pgloadgen_wal_records_total` | Counter | Total WAL records generated |
-| `pgloadgen_wal_fpi_total` | Counter | Full-page images written to WAL |
-| `pgloadgen_wal_buffers_full_total` | Counter | Times WAL was flushed because WAL buffers were full |
+| `pgstorm_wal_bytes_total` | Counter | Total WAL bytes generated |
+| `pgstorm_wal_records_total` | Counter | Total WAL records generated |
+| `pgstorm_wal_fpi_total` | Counter | Full-page images written to WAL |
+| `pgstorm_wal_buffers_full_total` | Counter | Times WAL was flushed because WAL buffers were full |
 
 ---
 
@@ -317,47 +317,47 @@ These PromQL expressions surface the most important Postgres health signals duri
 
 **Throughput and error rate:**
 ```promql
-rate(pgloadgen_ops_total{status="ok"}[1m])
-rate(pgloadgen_ops_total{status="error"}[1m])
+rate(pgstorm_ops_total{status="ok"}[1m])
+rate(pgstorm_ops_total{status="error"}[1m])
 ```
 
 **Latency percentiles by operation:**
 ```promql
-histogram_quantile(0.99, rate(pgloadgen_op_duration_seconds_bucket[1m]))
-histogram_quantile(0.50, rate(pgloadgen_op_duration_seconds_bucket[1m]))
+histogram_quantile(0.99, rate(pgstorm_op_duration_seconds_bucket[1m]))
+histogram_quantile(0.50, rate(pgstorm_op_duration_seconds_bucket[1m]))
 ```
 
 **MVCC dead tuple accumulation** — rising dead tuples with infrequent autovacuum means bloat is building faster than it is being reclaimed:
 ```promql
-pgloadgen_table_dead_tuples
-rate(pgloadgen_table_autovacuum_total[5m])
+pgstorm_table_dead_tuples
+rate(pgstorm_table_autovacuum_total[5m])
 ```
 
 **WAL write amplification** — how many bytes of WAL each write generates, and full-page image spikes after each checkpoint:
 ```promql
-rate(pgloadgen_wal_bytes_total[1m])
-rate(pgloadgen_wal_fpi_total[1m])
+rate(pgstorm_wal_bytes_total[1m])
+rate(pgstorm_wal_fpi_total[1m])
 ```
 
 **Checkpoint pressure** — `checkpoints_req` should be near zero; a non-zero rate means WAL is filling up faster than `checkpoint_timeout`:
 ```promql
-rate(pgloadgen_bgwriter_checkpoints_req_total[5m])
+rate(pgstorm_bgwriter_checkpoints_req_total[5m])
 ```
 
 **Backend buffer writes** *(PG14–16)* — backends forced to write dirty buffers directly is a sign the bgwriter cannot keep up:
 ```promql
-rate(pgloadgen_bgwriter_buffers_backend_total[1m])
+rate(pgstorm_bgwriter_buffers_backend_total[1m])
 ```
 
 **Index utilisation** *(requires `CREATE_INDEXES=true`)*:
 ```promql
-rate(pgloadgen_index_scans_total[1m])
-pgloadgen_index_size_bytes
+rate(pgstorm_index_scans_total[1m])
+pgstorm_index_size_bytes
 ```
 
 **Connection pool saturation:**
 ```promql
-pgloadgen_pool_acquired_conns / pgloadgen_pool_max_conns
+pgstorm_pool_acquired_conns / pgstorm_pool_max_conns
 ```
 
 ---

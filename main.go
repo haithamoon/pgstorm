@@ -16,13 +16,13 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/haithamoon/pgstorm/config"
+	"github.com/haithamoon/pgstorm/db"
+	"github.com/haithamoon/pgstorm/metrics"
+	"github.com/haithamoon/pgstorm/workload"
 	"github.com/joho/godotenv"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"pg-loadgen/config"
-	"pg-loadgen/db"
-	"pg-loadgen/metrics"
-	"pg-loadgen/workload"
 )
 
 var ready atomic.Bool

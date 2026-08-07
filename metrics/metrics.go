@@ -8,7 +8,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-const namespace = "pgloadgen"
+const namespace = "pgstorm"
 
 var (
 	OpsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{

@@ -10,9 +10,9 @@ import (
 	"math/rand"
 	"sort"
 
+	"github.com/haithamoon/pgstorm/config"
+	"github.com/haithamoon/pgstorm/db"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"pg-loadgen/config"
-	"pg-loadgen/db"
 )
 
 // Profile is a self-contained workload: its schema, its operation set, and a

@@ -8,7 +8,7 @@ import (
 	"math/rand"
 	"testing"
 
-	"pg-loadgen/config"
+	"github.com/haithamoon/pgstorm/config"
 )
 
 func TestGetProfile_knownAndUnknown(t *testing.T) {
