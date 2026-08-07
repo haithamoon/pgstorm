@@ -13,7 +13,7 @@ A Go-based PostgreSQL load generator that stresses **heap I/O**, **Toast storage
 <!-- UPDATE THIS SECTION AT THE END OF EVERY SESSION -->
 
 **Last updated:** 2026-08-07
-**Active branch:** `feature/hai-6-broken-quickstart-go-build-does-not-produce-pgstorm-binary`
+**Active branch:** `main`
 
 ### In progress
 - **All of P0/P1/P2 are complete** (the last P2 item, "raise payload cardinality", was closed as won't-do — see `CODE-REVIEW.md` rationale). Comprehensive unit tests added and coverage verified (config 100%, workload 97.1%). **The only remaining work is P3** — `pgvector` and message-queue benchmark profiles — which is **blocked on a design decision** (which profile first) and would include the `workload/profiles/` subpackage reorg. Backlog detail in `CODE-REVIEW.md` (git-ignored); P3 design in `docs/rfc-workload-profiles.md`.
