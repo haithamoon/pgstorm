@@ -5,8 +5,10 @@
 package workload
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
@@ -16,6 +18,8 @@ import (
 	"time"
 
 	"github.com/haithamoon/pgstorm/config"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 func testCfg() *config.Config {
@@ -310,7 +314,7 @@ func TestBuildRunResult_totalsAndRates(t *testing.T) {
 	totals[OpInsert] = opStats{count: 100, errors: 3, latencies: totals[OpInsert].latencies}
 	totals[OpReadSimple] = opStats{count: 50, errors: 0, latencies: totals[OpReadSimple].latencies}
 
-	r := BuildRunResult(totals, started, ended, testCfg(), testWeights)
+	r := BuildRunResult(totals, started, ended, testCfg(), testWeights, nil)
 
 	if r.DurationSeconds != 10 {
 		t.Errorf("duration: want 10, got %v", r.DurationSeconds)
@@ -344,7 +348,7 @@ func TestBuildRunResult_totalsAndRates(t *testing.T) {
 func TestBuildRunResult_zeroDurationDoesNotProduceInfinity(t *testing.T) {
 	now := time.Now()
 	totals := map[string]opStats{OpInsert: *statsWith([2]float64{10, 5})}
-	r := BuildRunResult(totals, now, now, testCfg(), testWeights)
+	r := BuildRunResult(totals, now, now, testCfg(), testWeights, nil)
 
 	if r.Totals.OpsPerSec != 0 {
 		t.Errorf("zero duration should give 0 ops/sec, got %v", r.Totals.OpsPerSec)
@@ -357,7 +361,7 @@ func TestBuildRunResult_zeroDurationDoesNotProduceInfinity(t *testing.T) {
 
 func TestBuildRunResult_capturesConfigAndWeights(t *testing.T) {
 	cfg := testCfg()
-	r := BuildRunResult(map[string]opStats{}, time.Now(), time.Now().Add(time.Second), cfg, testWeights)
+	r := BuildRunResult(map[string]opStats{}, time.Now(), time.Now().Add(time.Second), cfg, testWeights, nil)
 
 	if r.Config.Workers != cfg.Workers || r.Config.ToastPct != cfg.ToastPct {
 		t.Errorf("config not carried through: %+v", r.Config)
@@ -376,19 +380,204 @@ func TestBuildRunResult_capturesConfigAndWeights(t *testing.T) {
 func TestBuildRunResult_timesAreUTC(t *testing.T) {
 	loc := time.FixedZone("UTC+7", 7*3600)
 	started := time.Date(2026, 8, 8, 12, 0, 0, 0, loc)
-	r := BuildRunResult(map[string]opStats{}, started, started.Add(time.Second), testCfg(), testWeights)
+	r := BuildRunResult(map[string]opStats{}, started, started.Add(time.Second), testCfg(), testWeights, nil)
 	if r.StartedAt.Location() != time.UTC || r.EndedAt.Location() != time.UTC {
 		t.Errorf("timestamps should be normalised to UTC so results compare across machines")
 	}
 }
 
 func TestBuildRunResult_emptyRun(t *testing.T) {
-	r := BuildRunResult(map[string]opStats{}, time.Now(), time.Now().Add(time.Second), testCfg(), nil)
+	r := BuildRunResult(map[string]opStats{}, time.Now(), time.Now().Add(time.Second), testCfg(), nil, nil)
 	if r.Totals.Ops != 0 || len(r.Operations) != 0 {
 		t.Errorf("empty run should produce zero totals and no operations, got %+v", r.Totals)
 	}
 	if _, err := json.Marshal(r); err != nil {
 		t.Errorf("empty result not encodable: %v", err)
+	}
+}
+
+// ── SnapshotDataset ──────────────────────────────────────────────────────────
+
+// scriptedRows returns pre-set values from Scan. The shared mockRows in
+// ops_test.go treats Scan as a no-op, which cannot exercise a query that reads
+// values back.
+type scriptedRows struct {
+	rows    [][]any
+	idx     int
+	scanErr error
+	err     error
+	closed  bool
+}
+
+func (r *scriptedRows) Next() bool {
+	if r.idx >= len(r.rows) {
+		return false
+	}
+	r.idx++
+	return true
+}
+
+func (r *scriptedRows) Scan(dest ...any) error {
+	if r.scanErr != nil {
+		return r.scanErr
+	}
+	row := r.rows[r.idx-1]
+	for i, d := range dest {
+		switch v := d.(type) {
+		case *string:
+			*v = row[i].(string)
+		case *int64:
+			*v = row[i].(int64)
+		default:
+			return fmt.Errorf("scriptedRows: unsupported dest type %T", d)
+		}
+	}
+	return nil
+}
+
+func (r *scriptedRows) Close()                                       { r.closed = true }
+func (r *scriptedRows) Err() error                                   { return r.err }
+func (r *scriptedRows) CommandTag() pgconn.CommandTag                { return pgconn.CommandTag{} }
+func (r *scriptedRows) FieldDescriptions() []pgconn.FieldDescription { return nil }
+func (r *scriptedRows) Values() ([]any, error)                       { return nil, nil }
+func (r *scriptedRows) RawValues() [][]byte                          { return nil }
+func (r *scriptedRows) Conn() *pgx.Conn                              { return nil }
+
+// scriptedPool serves one scriptedRows (or an error) from Query.
+type scriptedPool struct {
+	rows     *scriptedRows
+	queryErr error
+	lastSQL  string
+	lastArgs []any
+}
+
+func (p *scriptedPool) Begin(ctx context.Context) (pgx.Tx, error) {
+	panic("unexpected Begin")
+}
+func (p *scriptedPool) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error) {
+	p.lastSQL, p.lastArgs = sql, args
+	if p.queryErr != nil {
+		return nil, p.queryErr
+	}
+	return p.rows, nil
+}
+func (p *scriptedPool) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+	panic("unexpected Exec")
+}
+
+func TestSnapshotDataset_sumsTablesAndTuples(t *testing.T) {
+	pool := &scriptedPool{rows: &scriptedRows{rows: [][]any{
+		{"sessions", int64(1000), int64(10)},
+		{"events", int64(2500), int64(40)},
+		{"audit_log", int64(500), int64(5)},
+	}}}
+
+	got, err := SnapshotDataset(context.Background(), pool, []string{"sessions", "events", "audit_log"})
+	if err != nil {
+		t.Fatalf("SnapshotDataset: %v", err)
+	}
+	if got.TotalBytes != 4000 {
+		t.Errorf("total bytes: want 4000, got %d", got.TotalBytes)
+	}
+	if got.LiveTuples != 55 {
+		t.Errorf("live tuples: want 55, got %d", got.LiveTuples)
+	}
+	if got.TableBytes["events"] != 2500 {
+		t.Errorf("per-table bytes: want events=2500, got %v", got.TableBytes)
+	}
+	if !pool.rows.closed {
+		t.Error("rows should be closed")
+	}
+	// Size must include out-of-line storage: heap-only would understate this
+	// workload several-fold, since TOAST is the point of it.
+	if !strings.Contains(pool.lastSQL, "pg_total_relation_size") {
+		t.Errorf("expected pg_total_relation_size, got query: %s", pool.lastSQL)
+	}
+}
+
+func TestSnapshotDataset_emptyDatabase(t *testing.T) {
+	pool := &scriptedPool{rows: &scriptedRows{}}
+	got, err := SnapshotDataset(context.Background(), pool, []string{"sessions"})
+	if err != nil {
+		t.Fatalf("SnapshotDataset: %v", err)
+	}
+	if got.TotalBytes != 0 || got.LiveTuples != 0 {
+		t.Errorf("want zeroes for an empty result set, got %+v", got)
+	}
+	if got.TableBytes == nil {
+		t.Error("TableBytes should be an empty map, not nil, so it encodes as {}")
+	}
+}
+
+func TestSnapshotDataset_errorPaths(t *testing.T) {
+	tests := []struct {
+		name string
+		pool *scriptedPool
+		want string
+	}{
+		{"query fails", &scriptedPool{queryErr: errors.New("boom")}, "query dataset size"},
+		{"scan fails", &scriptedPool{rows: &scriptedRows{
+			rows: [][]any{{"sessions", int64(1), int64(1)}}, scanErr: errors.New("bad"),
+		}}, "scan dataset size"},
+		{"iteration fails", &scriptedPool{rows: &scriptedRows{err: errors.New("torn")}}, "read dataset size"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := SnapshotDataset(context.Background(), tc.pool, []string{"sessions"})
+			if err == nil {
+				t.Fatal("expected an error")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error should name the failing step %q, got: %v", tc.want, err)
+			}
+		})
+	}
+}
+
+func TestBuildRunResult_datasetOmittedWhenUnavailable(t *testing.T) {
+	r := BuildRunResult(map[string]opStats{}, time.Now(), time.Now().Add(time.Second),
+		testCfg(), testWeights, nil)
+	if r.Dataset != nil {
+		t.Error("dataset should be nil when it could not be measured")
+	}
+	raw, err := json.Marshal(r)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	// Absent, not zeroed — a missing measurement must not read as an empty database.
+	if strings.Contains(string(raw), "dataset") {
+		t.Errorf("dataset key should be omitted entirely, got: %s", raw)
+	}
+}
+
+func TestBuildRunResult_datasetIncludedWhenPresent(t *testing.T) {
+	ds := &DatasetSnapshot{
+		Start:       DatasetSize{TotalBytes: 1000, LiveTuples: 10, TableBytes: map[string]int64{"events": 1000}},
+		End:         DatasetSize{TotalBytes: 4000, LiveTuples: 44, TableBytes: map[string]int64{"events": 4000}},
+		GrowthBytes: 3000,
+	}
+	r := BuildRunResult(map[string]opStats{}, time.Now(), time.Now().Add(time.Second),
+		testCfg(), testWeights, ds)
+
+	raw, err := json.Marshal(r)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var got RunResult
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Dataset == nil {
+		t.Fatal("dataset lost in round-trip")
+	}
+	if got.Dataset.GrowthBytes != 3000 {
+		t.Errorf("growth: want 3000, got %d", got.Dataset.GrowthBytes)
+	}
+	if got.Dataset.Start.TotalBytes != 1000 || got.Dataset.End.TotalBytes != 4000 {
+		t.Errorf("start/end sizes lost: %+v", got.Dataset)
+	}
+	if got.Dataset.End.TableBytes["events"] != 4000 {
+		t.Errorf("per-table breakdown lost: %+v", got.Dataset.End.TableBytes)
 	}
 }
 
@@ -400,7 +589,7 @@ func TestWriteRunResult_roundTrips(t *testing.T) {
 
 	started := time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC)
 	totals := map[string]opStats{OpInsert: *statsWith([2]float64{10, 4})}
-	want := BuildRunResult(totals, started, started.Add(4*time.Second), testCfg(), testWeights)
+	want := BuildRunResult(totals, started, started.Add(4*time.Second), testCfg(), testWeights, nil)
 
 	if err := WriteRunResult(path, want); err != nil {
 		t.Fatalf("WriteRunResult: %v", err)
@@ -450,12 +639,12 @@ func TestWriteRunResult_overwritesAtomically(t *testing.T) {
 	path := filepath.Join(dir, "result.json")
 
 	first := BuildRunResult(map[string]opStats{OpInsert: {count: 1}},
-		time.Now(), time.Now().Add(time.Second), testCfg(), testWeights)
+		time.Now(), time.Now().Add(time.Second), testCfg(), testWeights, nil)
 	if err := WriteRunResult(path, first); err != nil {
 		t.Fatalf("first write: %v", err)
 	}
 	second := BuildRunResult(map[string]opStats{OpInsert: {count: 999}},
-		time.Now(), time.Now().Add(time.Second), testCfg(), testWeights)
+		time.Now(), time.Now().Add(time.Second), testCfg(), testWeights, nil)
 	if err := WriteRunResult(path, second); err != nil {
 		t.Fatalf("second write: %v", err)
 	}

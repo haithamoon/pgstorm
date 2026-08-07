@@ -5,6 +5,7 @@
 package workload
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -72,6 +73,29 @@ type RunConfig struct {
 	OpWeights       map[string]int `json:"op_weights"`
 }
 
+// DatasetSize is how much data the tracked tables hold at one point in time.
+// Sizes come from pg_total_relation_size, so they include TOAST and index
+// storage — for this workload the out-of-line data is most of the point, and
+// heap-only figures would understate it several-fold.
+type DatasetSize struct {
+	TotalBytes int64            `json:"total_bytes"`
+	LiveTuples int64            `json:"live_tuples"`
+	TableBytes map[string]int64 `json:"table_bytes"`
+}
+
+// DatasetSnapshot brackets a run with the dataset it operated on.
+//
+// This matters more here than for most load generators: pgstorm starts from
+// whatever is already in the database and grows as it runs, so the volume of
+// data is a function of how long the run lasted and how fast the machine is.
+// Without these numbers a result cannot be compared to another one, because
+// the two were not measuring the same database.
+type DatasetSnapshot struct {
+	Start       DatasetSize `json:"start"`
+	End         DatasetSize `json:"end"`
+	GrowthBytes int64       `json:"growth_bytes"`
+}
+
 // RunResult is the top-level document written at the end of a run.
 type RunResult struct {
 	Profile         string     `json:"profile"`
@@ -81,6 +105,43 @@ type RunResult struct {
 	Config          RunConfig  `json:"config"`
 	Totals          RunTotals  `json:"totals"`
 	Operations      []OpResult `json:"operations"`
+
+	// Dataset is omitted rather than zeroed when the size could not be read, so
+	// a missing measurement is never mistaken for an empty database.
+	Dataset *DatasetSnapshot `json:"dataset,omitempty"`
+}
+
+// SnapshotDataset reads the current size of the tracked tables.
+//
+// Shared state: with several replicas against one database every process sees
+// the same totals, unlike the per-process operation counts.
+func SnapshotDataset(ctx context.Context, pool DBPool, tables []string) (DatasetSize, error) {
+	out := DatasetSize{TableBytes: map[string]int64{}}
+	rows, err := pool.Query(ctx, `
+		SELECT relname, pg_total_relation_size(relid), n_live_tup
+		FROM pg_stat_user_tables
+		WHERE schemaname = 'public'
+		  AND relname = ANY($1)
+	`, tables)
+	if err != nil {
+		return DatasetSize{}, fmt.Errorf("query dataset size: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var name string
+		var bytes, live int64
+		if err := rows.Scan(&name, &bytes, &live); err != nil {
+			return DatasetSize{}, fmt.Errorf("scan dataset size: %w", err)
+		}
+		out.TableBytes[name] = bytes
+		out.TotalBytes += bytes
+		out.LiveTuples += live
+	}
+	if err := rows.Err(); err != nil {
+		return DatasetSize{}, fmt.Errorf("read dataset size: %w", err)
+	}
+	return out, nil
 }
 
 // BuildRunResult assembles the document from a finalised set of totals. Pure:
@@ -90,11 +151,14 @@ type RunResult struct {
 // (a run that ended in the same instant it started, which only happens in
 // tests) yields zero rates rather than an infinity that would not survive a
 // JSON round-trip.
+// dataset may be nil when the size could not be read; the field is then omitted
+// from the document rather than written as zeros.
 func BuildRunResult(
 	totals map[string]opStats,
 	started, ended time.Time,
 	cfg *config.Config,
 	ops []WeightedOp,
+	dataset *DatasetSnapshot,
 ) RunResult {
 	duration := ended.Sub(started).Seconds()
 	rate := func(n int64) float64 {
@@ -156,6 +220,7 @@ func BuildRunResult(
 		},
 		Totals:     t,
 		Operations: operations,
+		Dataset:    dataset,
 	}
 }
 

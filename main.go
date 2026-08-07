@@ -98,6 +98,23 @@ func main() {
 		}
 	}()
 
+	// Measure the dataset before any worker touches it. pgstorm grows the
+	// database as it runs, so without a starting size a result cannot be
+	// compared against another — the two were not measuring the same database.
+	// Only needed when a result will actually be written.
+	var datasetStart workload.DatasetSize
+	var datasetOK bool
+	if cfg.ResultJSONPath != "" {
+		datasetStart, err = workload.SnapshotDataset(ctx, pool, profile.Schema().TrackedTables)
+		if err != nil {
+			log.Printf("dataset size at start: %v (result will omit dataset)", err)
+		} else {
+			datasetOK = true
+			log.Printf("dataset at start: %.1f MB, %d live tuples",
+				float64(datasetStart.TotalBytes)/(1<<20), datasetStart.LiveTuples)
+		}
+	}
+
 	log.Printf("starting %d workers", cfg.Workers)
 
 	collector := workload.NewStatsCollector(workload.OpNames(ops))
@@ -158,7 +175,26 @@ func main() {
 	// already happened, and the console summaries were printed.
 	if cfg.ResultJSONPath != "" {
 		totals, started, ended := collector.Finalize()
-		result := workload.BuildRunResult(totals, started, ended, cfg, ops)
+
+		// ctx was cancelled to stop the workers, so the closing measurement needs
+		// its own short-lived context or the query would fail immediately.
+		var dataset *workload.DatasetSnapshot
+		if datasetOK {
+			dsCtx, dsCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			datasetEnd, dsErr := workload.SnapshotDataset(dsCtx, pool, profile.Schema().TrackedTables)
+			dsCancel()
+			if dsErr != nil {
+				log.Printf("dataset size at end: %v (result will omit dataset)", dsErr)
+			} else {
+				dataset = &workload.DatasetSnapshot{
+					Start:       datasetStart,
+					End:         datasetEnd,
+					GrowthBytes: datasetEnd.TotalBytes - datasetStart.TotalBytes,
+				}
+			}
+		}
+
+		result := workload.BuildRunResult(totals, started, ended, cfg, ops, dataset)
 		if err := workload.WriteRunResult(cfg.ResultJSONPath, result); err != nil {
 			log.Printf("write result json: %v", err)
 		} else {
