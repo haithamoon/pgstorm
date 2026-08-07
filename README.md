@@ -10,6 +10,7 @@ Most Postgres load generators just fire INSERTs. pgstorm is specifically designe
 
 ## Table of Contents
 
+- [Why not just pgbench?](#why-not-just-pgbench)
 - [Quick Start](#quick-start)
 - [How It Works](#how-it-works)
 - [Schema](#schema)
@@ -18,6 +19,31 @@ Most Postgres load generators just fire INSERTs. pgstorm is specifically designe
 - [What to Watch](#what-to-watch)
 - [Running Multiple Replicas](#running-multiple-replicas)
 - [License](#license)
+
+---
+
+## Why not just pgbench?
+
+Often you should. `pgbench` ships with Postgres, everyone knows it, and its numbers are comparable against decades of published results. If you are sizing hardware or evaluating managed-Postgres providers, use `pgbench`.
+
+pgstorm answers a different question. `pgbench`'s default TPC-B workload uses four tables of roughly 100-byte rows — deliberately, because that isolates transaction throughput. The side effect is that several things which actually degrade production databases never happen: rows that small never reach the ~2 KB TOAST threshold, so out-of-line storage is never exercised, and the default script contains no `DELETE`.
+
+|  | pgbench (default TPC-B) | pgstorm |
+|---|---|---|
+| Question it answers | "How many TPS can this box do?" | "Why does my database degrade over time?" |
+| Row size | ~100 bytes | 8–16 KB JSONB (20% of writes by default, tunable via `TOAST_PCT`) |
+| TOAST | Never — rows sit far below the threshold | By design, and controllable |
+| Payload compressibility | n/a | Incompressible base64, so pglz cannot quietly keep values inline |
+| Deletes | None in the default script | Batched deletes, driving real dead-tuple churn |
+| Server internals | Not exposed — you instrument separately | `pg_stat_wal`, `pg_stat_bgwriter`/`pg_stat_checkpointer`, `pg_stat_user_tables`, `pg_stat_activity` exported to Prometheus |
+| Row selection | Uniform random | Ring buffer of recent IDs — no `ORDER BY random()` scans |
+| Result comparability | Excellent | Low — there is no published result corpus yet |
+
+**Reach for `pgbench`** when you want a comparable TPS number.
+
+**Reach for pgstorm** when you are chasing TOAST amplification, sizing `max_wal_size`, tuning autovacuum, or testing a checkpoint theory — questions that need a workload which actually produces bloat and out-of-line storage.
+
+One honest caveat: `pgbench -f` accepts custom scripts, so a determined user could reproduce much of pgstorm's *workload*. The harder part to replicate is the observability — pgstorm exports WAL bytes/records/FPI, dead tuples, autovacuum counts, checkpoint pressure and wait events **alongside** client-side latency, so cause and effect land on one timeline instead of two.
 
 ---
 
