@@ -106,6 +106,15 @@ func main() {
 	var datasetOK bool
 	var server *workload.ServerInfo
 	if cfg.ResultJSONPath != "" {
+		if cfg.RunDurationSecs == 0 {
+			// The result will still be written on Ctrl-C, but its duration is
+			// whatever happened to elapse — which makes it useless for comparing
+			// a before-tuning run against an after-tuning one.
+			log.Println("warning: RUN_DURATION_SECS=0 with a result path — the run " +
+				"length will be however long until you stop it, so the result will " +
+				"not be comparable against another run")
+		}
+
 		datasetStart, err = workload.SnapshotDataset(ctx, pool, profile.Schema().TrackedTables)
 		if err != nil {
 			log.Printf("dataset size at start: %v (result will omit dataset)", err)
@@ -168,11 +177,15 @@ func main() {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 
+	// Recorded in the result: an "after" run cut short by Ctrl-C must not be
+	// mistaken for one that ran its configured course.
+	stoppedBy := workload.StoppedBySignal
 	select {
 	case sig := <-sigCh:
 		log.Printf("received signal %v — shutting down", sig)
 		cancel()
 	case <-runCtx.Done():
+		stoppedBy = workload.StoppedByDuration
 		log.Println("run duration elapsed — shutting down")
 		cancel()
 	}
@@ -205,7 +218,11 @@ func main() {
 			}
 		}
 
-		result := workload.BuildRunResult(totals, started, ended, cfg, ops, dataset, server)
+		result := workload.BuildRunResult(totals, started, ended, cfg, ops, workload.RunMeta{
+			Dataset:   dataset,
+			Server:    server,
+			StoppedBy: stoppedBy,
+		})
 		if err := workload.WriteRunResult(cfg.ResultJSONPath, result); err != nil {
 			log.Printf("write result json: %v", err)
 		} else {

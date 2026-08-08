@@ -315,7 +315,7 @@ func TestBuildRunResult_totalsAndRates(t *testing.T) {
 	totals[OpInsert] = opStats{count: 100, errors: 3, latencies: totals[OpInsert].latencies}
 	totals[OpReadSimple] = opStats{count: 50, errors: 0, latencies: totals[OpReadSimple].latencies}
 
-	r := BuildRunResult(totals, started, ended, testCfg(), testWeights, nil, nil)
+	r := BuildRunResult(totals, started, ended, testCfg(), testWeights, RunMeta{})
 
 	if r.DurationSeconds != 10 {
 		t.Errorf("duration: want 10, got %v", r.DurationSeconds)
@@ -349,7 +349,7 @@ func TestBuildRunResult_totalsAndRates(t *testing.T) {
 func TestBuildRunResult_zeroDurationDoesNotProduceInfinity(t *testing.T) {
 	now := time.Now()
 	totals := map[string]opStats{OpInsert: *statsWith([2]float64{10, 5})}
-	r := BuildRunResult(totals, now, now, testCfg(), testWeights, nil, nil)
+	r := BuildRunResult(totals, now, now, testCfg(), testWeights, RunMeta{})
 
 	if r.Totals.OpsPerSec != 0 {
 		t.Errorf("zero duration should give 0 ops/sec, got %v", r.Totals.OpsPerSec)
@@ -362,7 +362,7 @@ func TestBuildRunResult_zeroDurationDoesNotProduceInfinity(t *testing.T) {
 
 func TestBuildRunResult_capturesConfigAndWeights(t *testing.T) {
 	cfg := testCfg()
-	r := BuildRunResult(map[string]opStats{}, time.Now(), time.Now().Add(time.Second), cfg, testWeights, nil, nil)
+	r := BuildRunResult(map[string]opStats{}, time.Now(), time.Now().Add(time.Second), cfg, testWeights, RunMeta{})
 
 	if r.Config.Workers != cfg.Workers || r.Config.ToastPct != cfg.ToastPct {
 		t.Errorf("config not carried through: %+v", r.Config)
@@ -381,14 +381,14 @@ func TestBuildRunResult_capturesConfigAndWeights(t *testing.T) {
 func TestBuildRunResult_timesAreUTC(t *testing.T) {
 	loc := time.FixedZone("UTC+7", 7*3600)
 	started := time.Date(2026, 8, 8, 12, 0, 0, 0, loc)
-	r := BuildRunResult(map[string]opStats{}, started, started.Add(time.Second), testCfg(), testWeights, nil, nil)
+	r := BuildRunResult(map[string]opStats{}, started, started.Add(time.Second), testCfg(), testWeights, RunMeta{})
 	if r.StartedAt.Location() != time.UTC || r.EndedAt.Location() != time.UTC {
 		t.Errorf("timestamps should be normalised to UTC so results compare across machines")
 	}
 }
 
 func TestBuildRunResult_emptyRun(t *testing.T) {
-	r := BuildRunResult(map[string]opStats{}, time.Now(), time.Now().Add(time.Second), testCfg(), nil, nil, nil)
+	r := BuildRunResult(map[string]opStats{}, time.Now(), time.Now().Add(time.Second), testCfg(), nil, RunMeta{})
 	if r.Totals.Ops != 0 || len(r.Operations) != 0 {
 		t.Errorf("empty run should produce zero totals and no operations, got %+v", r.Totals)
 	}
@@ -537,7 +537,7 @@ func TestSnapshotDataset_errorPaths(t *testing.T) {
 
 func TestBuildRunResult_datasetOmittedWhenUnavailable(t *testing.T) {
 	r := BuildRunResult(map[string]opStats{}, time.Now(), time.Now().Add(time.Second),
-		testCfg(), testWeights, nil, nil)
+		testCfg(), testWeights, RunMeta{})
 	if r.Dataset != nil {
 		t.Error("dataset should be nil when it could not be measured")
 	}
@@ -558,7 +558,7 @@ func TestBuildRunResult_datasetIncludedWhenPresent(t *testing.T) {
 		GrowthBytes: 3000,
 	}
 	r := BuildRunResult(map[string]opStats{}, time.Now(), time.Now().Add(time.Second),
-		testCfg(), testWeights, ds, nil)
+		testCfg(), testWeights, RunMeta{Dataset: ds})
 
 	raw, err := json.Marshal(r)
 	if err != nil {
@@ -698,7 +698,7 @@ func TestSnapshotServerInfo_errorPaths(t *testing.T) {
 
 func TestBuildRunResult_serverOmittedWhenUnavailable(t *testing.T) {
 	r := BuildRunResult(map[string]opStats{}, time.Now(), time.Now().Add(time.Second),
-		testCfg(), testWeights, nil, nil)
+		testCfg(), testWeights, RunMeta{})
 	if r.Server != nil {
 		t.Error("server should be nil when it could not be read")
 	}
@@ -719,7 +719,7 @@ func TestBuildRunResult_serverRoundTrips(t *testing.T) {
 		Settings: map[string]string{"shared_buffers": "16384 8kB", "synchronous_commit": "on"},
 	}
 	r := BuildRunResult(map[string]opStats{}, time.Now(), time.Now().Add(time.Second),
-		testCfg(), testWeights, nil, info)
+		testCfg(), testWeights, RunMeta{Server: info})
 
 	raw, err := json.Marshal(r)
 	if err != nil {
@@ -757,7 +757,7 @@ func TestRunResult_neverLeaksCredentials(t *testing.T) {
 	r := BuildRunResult(
 		map[string]opStats{OpInsert: *statsWith([2]float64{1, 1})},
 		time.Now(), time.Now().Add(time.Second), cfg, testWeights,
-		&DatasetSnapshot{}, info,
+		RunMeta{Dataset: &DatasetSnapshot{}, Server: info, StoppedBy: StoppedByDuration},
 	)
 	raw, err := json.Marshal(r)
 	if err != nil {
@@ -779,6 +779,53 @@ func TestRunResult_neverLeaksCredentials(t *testing.T) {
 	}
 }
 
+// ── stopped_by ───────────────────────────────────────────────────────────────
+
+func TestBuildRunResult_stoppedByRoundTrips(t *testing.T) {
+	// The tuning workflow is measure, change something, measure again. A run cut
+	// short by Ctrl-C must be distinguishable from one that ran its course, or
+	// the comparison is quietly wrong.
+	for _, want := range []string{StoppedByDuration, StoppedBySignal} {
+		t.Run(want, func(t *testing.T) {
+			r := BuildRunResult(map[string]opStats{}, time.Now(), time.Now().Add(time.Second),
+				testCfg(), testWeights, RunMeta{StoppedBy: want})
+			if r.StoppedBy != want {
+				t.Errorf("StoppedBy: want %q, got %q", want, r.StoppedBy)
+			}
+			raw, err := json.Marshal(r)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			var got RunResult
+			if err := json.Unmarshal(raw, &got); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if got.StoppedBy != want {
+				t.Errorf("after round-trip: want %q, got %q", want, got.StoppedBy)
+			}
+		})
+	}
+}
+
+func TestBuildRunResult_stoppedByOmittedWhenUnset(t *testing.T) {
+	r := BuildRunResult(map[string]opStats{}, time.Now(), time.Now().Add(time.Second),
+		testCfg(), testWeights, RunMeta{})
+	raw, err := json.Marshal(r)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(raw), "stopped_by") {
+		t.Errorf("stopped_by should be omitted when unset, got: %s", raw)
+	}
+}
+
+func TestStoppedByConstants_areDistinct(t *testing.T) {
+	// Guards a copy-paste that would make every run look the same.
+	if StoppedByDuration == StoppedBySignal {
+		t.Fatal("the two stop reasons must differ")
+	}
+}
+
 // ── WriteRunResult ───────────────────────────────────────────────────────────
 
 func TestWriteRunResult_roundTrips(t *testing.T) {
@@ -787,7 +834,7 @@ func TestWriteRunResult_roundTrips(t *testing.T) {
 
 	started := time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC)
 	totals := map[string]opStats{OpInsert: *statsWith([2]float64{10, 4})}
-	want := BuildRunResult(totals, started, started.Add(4*time.Second), testCfg(), testWeights, nil, nil)
+	want := BuildRunResult(totals, started, started.Add(4*time.Second), testCfg(), testWeights, RunMeta{})
 
 	if err := WriteRunResult(path, want); err != nil {
 		t.Fatalf("WriteRunResult: %v", err)
@@ -837,12 +884,12 @@ func TestWriteRunResult_overwritesAtomically(t *testing.T) {
 	path := filepath.Join(dir, "result.json")
 
 	first := BuildRunResult(map[string]opStats{OpInsert: {count: 1}},
-		time.Now(), time.Now().Add(time.Second), testCfg(), testWeights, nil, nil)
+		time.Now(), time.Now().Add(time.Second), testCfg(), testWeights, RunMeta{})
 	if err := WriteRunResult(path, first); err != nil {
 		t.Fatalf("first write: %v", err)
 	}
 	second := BuildRunResult(map[string]opStats{OpInsert: {count: 999}},
-		time.Now(), time.Now().Add(time.Second), testCfg(), testWeights, nil, nil)
+		time.Now(), time.Now().Add(time.Second), testCfg(), testWeights, RunMeta{})
 	if err := WriteRunResult(path, second); err != nil {
 		t.Fatalf("second write: %v", err)
 	}
