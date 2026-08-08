@@ -109,10 +109,104 @@ func TestRecord_errorIncrements(t *testing.T) {
 	if s.errors != 1 {
 		t.Errorf("errors: want 1, got %d", s.errors)
 	}
-	// Errored ops still contribute their latency — an op that failed slowly is
-	// still evidence about how the server behaved.
-	if got := s.latencies[1000]; got != 2 {
-		t.Errorf("both observations should be recorded, got latencies[1000]=%d", got)
+	// A failed op is counted but contributes no latency.
+	//
+	// This assertion used to be the reverse, justified as "an op that failed
+	// slowly is still evidence about how the server behaved". That is true of a
+	// single slow failure and false of the population: failures are dominated by
+	// fast ones, so mixing them in drags the percentiles down and makes a
+	// degrading server look faster. If you are here because you want error
+	// timings back, add a separate population — do not merge them into this one.
+	if got := s.latencies[1000]; got != 1 {
+		t.Errorf("only the successful op should contribute latency, got latencies[1000]=%d", got)
+	}
+	if len(s.latencies) != 1 {
+		t.Errorf("failed op leaked a latency key: %v", s.latencies)
+	}
+}
+
+// TestPercentiles_doNotImproveAsTheServerFails is the regression guard for the
+// defect this separation exists to fix. A closed-loop generator with no backoff
+// retries instantly after a failure, so a database that rejects connections
+// emits a flood of microsecond "latencies". Blended into one population they
+// outnumber the real observations and pull every quantile toward zero — the
+// reported p99 improves precisely as the server gets worse, which inverts a
+// before/after tuning conclusion.
+//
+// Framed as the inversion rather than as "errors are excluded" so the failure
+// message names the actual defect.
+func TestPercentiles_doNotImproveAsTheServerFails(t *testing.T) {
+	const slowMS = 500.0
+
+	healthy := newWorkerStats(testOps)
+	for i := 0; i < 10; i++ {
+		healthy.Record(OpReadJoin, slowMS/1000, nil)
+	}
+
+	// Same real work, plus a database that is now failing fast.
+	degraded := newWorkerStats(testOps)
+	for i := 0; i < 10; i++ {
+		degraded.Record(OpReadJoin, slowMS/1000, nil)
+	}
+	for i := 0; i < 1000; i++ {
+		degraded.Record(OpReadJoin, 0.0001, fmt.Errorf("connection refused"))
+	}
+
+	h, d := healthy.data[OpReadJoin], degraded.data[OpReadJoin]
+
+	// Against the old behaviour: total=1010, rank(0.99)=ceil(0.99*1010)=1000,
+	// and the 100µs key alone holds 1000 observations — so p99 came back as
+	// 0.1ms instead of 500ms, a 5000x understatement.
+	hp99, dp99 := percentile(h, 0.99), percentile(d, 0.99)
+	if dp99 < hp99 {
+		t.Errorf("p99 improved as the server degraded: healthy=%.1fms degraded=%.1fms", hp99, dp99)
+	}
+	if !approxEq(dp99, slowMS) {
+		t.Errorf("degraded p99: want %.1fms (the real work), got %.1fms", slowMS, dp99)
+	}
+	if got := percentile(d, 0.50); !approxEq(got, slowMS) {
+		t.Errorf("degraded p50: want %.1fms, got %.1fms", slowMS, got)
+	}
+
+	if d.count != 1010 || d.errors != 1000 {
+		t.Errorf("failures must still be counted: count=%d errors=%d, want 1010/1000", d.count, d.errors)
+	}
+	ls := d.latencyStats()
+	if !approxEq(ls.MinMS, slowMS) || !approxEq(ls.MaxMS, slowMS) || !approxEq(ls.MeanMS, slowMS) {
+		t.Errorf("every summary stat should reflect the successes only, got %+v", ls)
+	}
+}
+
+// TestRecord_latencySamplesEqualSuccesses pins the invariant documented on
+// opStats. It is what makes an absent latency block in the result unambiguous:
+// absent iff count == errors.
+func TestRecord_latencySamplesEqualSuccesses(t *testing.T) {
+	tests := []struct {
+		name          string
+		oks, failures int
+	}{
+		{"all successful", 7, 0},
+		{"mixed", 4, 3},
+		{"all failed", 0, 5},
+		{"nothing recorded", 0, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ws := newWorkerStats(testOps)
+			for i := 0; i < tt.oks; i++ {
+				ws.Record(OpUpdate, 0.002, nil)
+			}
+			for i := 0; i < tt.failures; i++ {
+				ws.Record(OpUpdate, 0.002, fmt.Errorf("boom"))
+			}
+			s := ws.data[OpUpdate]
+			if got, want := s.samples(), s.count-s.errors; got != want {
+				t.Errorf("sum(latencies)=%d, want count-errors=%d", got, want)
+			}
+			if tt.oks == 0 && s.latencies != nil {
+				t.Errorf("no successful op should leave a nil map, got %v", s.latencies)
+			}
+		})
 	}
 }
 
@@ -165,6 +259,12 @@ func TestSnapshot_returnsDataAndResets(t *testing.T) {
 	}
 	if len(snap[OpInsert].latencies) != 2 {
 		t.Errorf("snapshot should carry both insert latencies, got %v", snap[OpInsert].latencies)
+	}
+	// The errored delete is counted but must carry no latency across the
+	// snapshot boundary either — the exclusion has to survive the handoff, not
+	// just hold inside Record.
+	if got := snap[OpDelete].samples(); got != 0 {
+		t.Errorf("errored op carried %d latency samples through snapshot, want 0", got)
 	}
 
 	// Second snapshot must return zeros — data was reset.
@@ -454,21 +554,58 @@ func captureStdout(t *testing.T, fn func()) string {
 	return <-done
 }
 
-// tableRow returns the summary-table row for op, split into trimmed cells.
-func tableRow(t *testing.T, out, op string) []string {
+// splitCells splits one table line on the box-drawing separator into trimmed,
+// non-empty cells.
+func splitCells(line string) []string {
+	var cells []string
+	for _, c := range strings.Split(line, "│") {
+		if c = strings.TrimSpace(c); c != "" {
+			cells = append(cells, c)
+		}
+	}
+	return cells
+}
+
+// tableRow returns a lookup into the summary-table row for op, keyed by the
+// column heading print() emits.
+//
+// Deliberately header-driven rather than positional: the previous version
+// returned a slice and callers indexed it, so adding one column broke three
+// unrelated tests at once and told them nothing about what had changed. Look
+// columns up by name and adding the next one costs nothing.
+func tableRow(t *testing.T, out, op string) func(col string) string {
 	t.Helper()
+
+	var header []string
 	for _, line := range strings.Split(out, "\n") {
-		if !strings.Contains(line, "│") || !strings.Contains(line, op) {
+		if !strings.Contains(line, "│") {
 			continue
 		}
-		var cells []string
-		for _, c := range strings.Split(line, "│") {
-			if c = strings.TrimSpace(c); c != "" {
-				cells = append(cells, c)
-			}
+		cells := splitCells(line)
+		if len(cells) == 0 {
+			continue
 		}
-		if len(cells) > 0 && cells[0] == op {
-			return cells
+		if header == nil && cells[0] == "op" {
+			header = cells
+			continue
+		}
+		if header == nil || cells[0] != op {
+			continue
+		}
+		if len(cells) != len(header) {
+			t.Fatalf("row for %q has %d cells but the header has %d:\n%s",
+				op, len(cells), len(header), out)
+		}
+		row := make(map[string]string, len(header))
+		for i, name := range header {
+			row[name] = cells[i]
+		}
+		return func(col string) string {
+			v, ok := row[col]
+			if !ok {
+				t.Fatalf("no column %q in summary table (have %v)", col, header)
+			}
+			return v
 		}
 	}
 	t.Fatalf("no table row for op %q in output:\n%s", op, out)
@@ -490,22 +627,49 @@ func TestStatsCollector_print_mergesWorkersIntoExactPercentiles(t *testing.T) {
 	}
 
 	out := captureStdout(t, func() { c.print(time.Now(), 30*time.Second, nil) })
-	cells := tableRow(t, out, OpInsert)
-	// cells: op, count, ops/s, p50, p95, p99
-	if len(cells) != 6 {
-		t.Fatalf("want 6 cells, got %d: %q", len(cells), cells)
+	cell := tableRow(t, out, OpInsert)
+	if cell("count") != "100" {
+		t.Errorf("count: want 100, got %q", cell("count"))
 	}
-	if cells[1] != "100" {
-		t.Errorf("count: want 100, got %q", cells[1])
+	if cell("p50 ms") != "10.0" {
+		t.Errorf("p50: want 10.0, got %q (merge across workers is wrong)", cell("p50 ms"))
 	}
-	if cells[3] != "10.0" {
-		t.Errorf("p50: want 10.0, got %q (merge across workers is wrong)", cells[3])
+	if cell("p95 ms") != "20.0" {
+		t.Errorf("p95: want 20.0, got %q", cell("p95 ms"))
 	}
-	if cells[4] != "20.0" {
-		t.Errorf("p95: want 20.0, got %q", cells[4])
+	if cell("p99 ms") != "20.0" {
+		t.Errorf("p99: want 20.0, got %q", cell("p99 ms"))
 	}
-	if cells[5] != "20.0" {
-		t.Errorf("p99: want 20.0, got %q", cells[5])
+}
+
+func TestStatsCollector_print_showsErrorsAndDashesFailedOnlyOps(t *testing.T) {
+	c := NewStatsCollector(testOps)
+	ws := c.NewWorkerStats()
+
+	// read_join half-fails; delete fails outright.
+	ws.Record(OpReadJoin, 0.010, nil)
+	ws.Record(OpReadJoin, 0.0001, fmt.Errorf("boom"))
+	for range 3 {
+		ws.Record(OpDelete, 0.0001, fmt.Errorf("boom"))
+	}
+
+	out := captureStdout(t, func() { c.print(time.Now(), 30*time.Second, nil) })
+
+	join := tableRow(t, out, OpReadJoin)
+	if join("err") != "1" {
+		t.Errorf("read_join err cell: want 1, got %q", join("err"))
+	}
+	if join("p99 ms") != "10.0" {
+		t.Errorf("read_join p99 should reflect the success only: want 10.0, got %q", join("p99 ms"))
+	}
+
+	del := tableRow(t, out, OpDelete)
+	if del("count") != "3" || del("err") != "3" {
+		t.Errorf("delete cells: want count=3 err=3, got count=%q err=%q", del("count"), del("err"))
+	}
+	// 0.0 here would read as "instant" for an op that never once succeeded.
+	if del("p99 ms") != "—" {
+		t.Errorf("wholly-failed op p99: want the em-dash, got %q", del("p99 ms"))
 	}
 }
 
@@ -516,9 +680,9 @@ func TestStatsCollector_print_reportsBeyondOldCeiling(t *testing.T) {
 	ws.Record(OpDelete, 90.0, nil) // 90 s
 
 	out := captureStdout(t, func() { c.print(time.Now(), 30*time.Second, nil) })
-	cells := tableRow(t, out, OpDelete)
-	if cells[5] != "90000.0" {
-		t.Errorf("p99: want 90000.0 ms, got %q (30000.0 would mean the clamp is back)", cells[5])
+	cell := tableRow(t, out, OpDelete)
+	if cell("p99 ms") != "90000.0" {
+		t.Errorf("p99: want 90000.0 ms, got %q (30000.0 would mean the clamp is back)", cell("p99 ms"))
 	}
 }
 
@@ -570,17 +734,22 @@ func TestStatsCollector_print_resetsAllWorkers(t *testing.T) {
 	}
 }
 
-func TestStatsCollector_print_emptyWindowShowsZeros(t *testing.T) {
+func TestStatsCollector_print_emptyWindowShowsNoLatency(t *testing.T) {
 	c := NewStatsCollector(testOps)
 	c.NewWorkerStats()
 	out := captureStdout(t, func() { c.print(time.Now(), 30*time.Second, nil) })
-	cells := tableRow(t, out, OpInsert)
-	if cells[1] != "0" {
-		t.Errorf("count: want 0, got %q", cells[1])
+	cell := tableRow(t, out, OpInsert)
+	if cell("count") != "0" {
+		t.Errorf("count: want 0, got %q", cell("count"))
 	}
-	for i, name := range map[int]string{3: "p50", 4: "p95", 5: "p99"} {
-		if cells[i] != "0.0" {
-			t.Errorf("%s on an empty window: want 0.0, got %q", name, cells[i])
+	if cell("err") != "0" {
+		t.Errorf("err: want 0, got %q", cell("err"))
+	}
+	// An idle window has nothing to summarise, same as a wholly-failed one; the
+	// count and err cells are what tell the two apart.
+	for _, col := range []string{"p50 ms", "p95 ms", "p99 ms"} {
+		if cell(col) != "—" {
+			t.Errorf("%s on an empty window: want the em-dash, got %q", col, cell(col))
 		}
 	}
 }

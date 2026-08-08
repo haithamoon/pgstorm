@@ -535,6 +535,85 @@ func TestSnapshotDataset_errorPaths(t *testing.T) {
 	}
 }
 
+// TestBuildRunResult_latencyPresentIffAnOpSucceeded pins the equivalence stated
+// on OpResult: the latency block is present iff count > errors. An op that
+// failed every time has nothing to summarise, and emitting an all-zero block
+// would read as "instant" — the same misreading this whole change removes.
+func TestBuildRunResult_latencyPresentIffAnOpSucceeded(t *testing.T) {
+	// opJSON returns the marshalled object for one op, so key presence can be
+	// checked per op. strings.Contains would be useless here: any other op in
+	// the document supplies the "latency" key.
+	opJSON := func(t *testing.T, r RunResult, op string) map[string]any {
+		t.Helper()
+		raw, err := json.Marshal(r)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		var doc struct {
+			Operations []map[string]any `json:"operations"`
+		}
+		if err := json.Unmarshal(raw, &doc); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		for _, o := range doc.Operations {
+			if o["op"] == op {
+				return o
+			}
+		}
+		t.Fatalf("op %q not in document: %s", op, raw)
+		return nil
+	}
+
+	t.Run("every attempt failed", func(t *testing.T) {
+		totals := map[string]opStats{OpDelete: {count: 5, errors: 5}}
+		r := BuildRunResult(totals, time.Now(), time.Now().Add(time.Second),
+			testCfg(), testWeights, RunMeta{})
+		if r.Operations[0].Latency != nil {
+			t.Errorf("latency should be nil, got %+v", r.Operations[0].Latency)
+		}
+		if _, ok := opJSON(t, r, OpDelete)["latency"]; ok {
+			t.Error("latency key should be omitted entirely, not zeroed")
+		}
+		// The failure itself is still fully reported.
+		if r.Operations[0].Count != 5 || r.Operations[0].Errors != 5 {
+			t.Errorf("count/errors must survive: %+v", r.Operations[0])
+		}
+	})
+
+	t.Run("some attempts succeeded", func(t *testing.T) {
+		s := statsWith([2]float64{10, 3})
+		s.count, s.errors = 5, 2
+		totals := map[string]opStats{OpInsert: *s}
+		r := BuildRunResult(totals, time.Now(), time.Now().Add(time.Second),
+			testCfg(), testWeights, RunMeta{})
+		if r.Operations[0].Latency == nil {
+			t.Fatal("latency should be present when an op succeeded")
+		}
+		if !approxEq(r.Operations[0].Latency.P99MS, 10) {
+			t.Errorf("p99: want 10, got %v", r.Operations[0].Latency.P99MS)
+		}
+	})
+
+	t.Run("one success measured at zero microseconds", func(t *testing.T) {
+		// The trap case. Record truncates sub-microsecond durations to 0 us, so a
+		// real observation yields an all-zero LatencyStats. An implementation that
+		// tested `ls == LatencyStats{}` instead of the sample count would wrongly
+		// drop this op's latency.
+		totals := map[string]opStats{OpReadSimple: {count: 1, latencies: map[int64]int64{0: 1}}}
+		r := BuildRunResult(totals, time.Now(), time.Now().Add(time.Second),
+			testCfg(), testWeights, RunMeta{})
+		if r.Operations[0].Latency == nil {
+			t.Fatal("a genuine 0 us observation must still be reported")
+		}
+		if *r.Operations[0].Latency != (LatencyStats{}) {
+			t.Errorf("want an all-zero block, got %+v", r.Operations[0].Latency)
+		}
+		if _, ok := opJSON(t, r, OpReadSimple)["latency"]; !ok {
+			t.Error("latency key should be present")
+		}
+	})
+}
+
 func TestBuildRunResult_datasetOmittedWhenUnavailable(t *testing.T) {
 	r := BuildRunResult(map[string]opStats{}, time.Now(), time.Now().Add(time.Second),
 		testCfg(), testWeights, RunMeta{})
@@ -858,6 +937,149 @@ func TestTimeseries_sumsExactlyToTotals(t *testing.T) {
 	if seriesOps != written {
 		t.Errorf("timeseries sums to %d, totals to %d — a window was lost or "+
 			"double-counted between print and Finalize", seriesOps, written)
+	}
+}
+
+// TestTimeseries_perOpErrorsSumToIntervalErrors is deliberately multi-op and
+// deliberately includes a sliver fold. Both existing sum-invariant tests use a
+// single op, so neither can catch the fold path dropping an operation: the fold
+// iterates the *predecessor's* entries, so an op idle during that window has its
+// ops added to the interval total while appearing against no operation at all.
+func TestTimeseries_perOpErrorsSumToIntervalErrors(t *testing.T) {
+	withMinInterval(t, 5) // make the final trailing window fold, not stand alone
+	c := NewStatsCollector(testOps)
+	ws := c.NewWorkerStats()
+
+	// Window 1: read_join only, and it half-fails. insert is deliberately absent
+	// so the fold below has to carry it over rather than find an entry for it.
+	//
+	// insert is chosen as the newcomer on purpose: it is declared *before*
+	// read_join in testOps, so a fold that appends newcomers rather than
+	// rebuilding in declared order emits them backwards and the ordering
+	// assertion at the end catches it. With the roles reversed the append
+	// happens to land in order and proves nothing.
+	ws.Record(OpReadJoin, 0.010, nil)
+	ws.Record(OpReadJoin, 0.001, errBoom)
+	captureStdout(t, func() { c.print(time.Now(), time.Second, nil) })
+
+	// Trailing sliver: an op the predecessor never saw, plus more of one it did.
+	ws.Record(OpInsert, 0.030, nil)
+	ws.Record(OpInsert, 0.001, errBoom)
+	ws.Record(OpReadJoin, 0.020, errBoom)
+
+	totals, intervals, _, _ := c.Finalize()
+
+	if len(intervals) != 1 {
+		t.Fatalf("the sliver should have folded into the single interval, got %d", len(intervals))
+	}
+
+	var wantOps, wantErrs int64
+	for _, s := range totals {
+		wantOps += s.count
+		wantErrs += s.errors
+	}
+
+	for _, iv := range intervals {
+		var perOpCount, perOpErrs int64
+		for _, o := range iv.Operations {
+			perOpCount += o.Count
+			perOpErrs += o.Errors
+		}
+		if perOpCount != iv.Ops {
+			t.Errorf("per-op counts (%d) do not sum to the interval's Ops (%d) — "+
+				"an op was dropped by the fold", perOpCount, iv.Ops)
+		}
+		if perOpErrs != iv.Errors {
+			t.Errorf("per-op errors (%d) do not sum to the interval's Errors (%d)",
+				perOpErrs, iv.Errors)
+		}
+	}
+
+	if intervals[0].Ops != wantOps || intervals[0].Errors != wantErrs {
+		t.Errorf("interval totals: want ops=%d errors=%d, got ops=%d errors=%d",
+			wantOps, wantErrs, intervals[0].Ops, intervals[0].Errors)
+	}
+
+	// insert existed only in the folded sliver, so its presence is the proof the
+	// carry-over path ran.
+	var sawInsert bool
+	for _, o := range intervals[0].Operations {
+		if o.Op == OpInsert {
+			sawInsert = true
+			if o.Count != 2 || o.Errors != 1 {
+				t.Errorf("insert: want count=2 errors=1, got count=%d errors=%d", o.Count, o.Errors)
+			}
+			if !approxEq(o.P99MS, 30) {
+				t.Errorf("insert p99 should come from its one success: want 30, got %v", o.P99MS)
+			}
+		}
+	}
+	if !sawInsert {
+		t.Error("insert appeared only in the folded sliver and was lost entirely")
+	}
+
+	// Ops are emitted in c.ops order so consecutive intervals line up when
+	// diffed; a fold must not reorder them.
+	assertOpsInDeclaredOrder(t, intervals[0].Operations)
+}
+
+// assertOpsInDeclaredOrder checks an interval's operations follow testOps order.
+func assertOpsInDeclaredOrder(t *testing.T, ops []IntervalOp) {
+	t.Helper()
+	pos := make(map[string]int, len(testOps))
+	for i, op := range testOps {
+		pos[op] = i
+	}
+	last := -1
+	for _, o := range ops {
+		i, ok := pos[o.Op]
+		if !ok {
+			t.Errorf("unknown op %q in interval", o.Op)
+			continue
+		}
+		if i < last {
+			var got []string
+			for _, x := range ops {
+				got = append(got, x.Op)
+			}
+			t.Errorf("interval ops out of declared order: %v (want the order of %v)", got, testOps)
+			return
+		}
+		last = i
+	}
+}
+
+// TestTimeseries_zeroSpanWindowReportsNoRate covers the degenerate window that
+// the sliver fold normally absorbs. With folding disabled a window can be
+// recorded with a span of exactly zero, and the rate must come back as 0 rather
+// than dividing by it. Pre-existing gap, covered here because a NaN or +Inf
+// ops_per_sec would poison a result document.
+func TestTimeseries_zeroSpanWindowReportsNoRate(t *testing.T) {
+	withMinInterval(t, 0) // never fold, so a zero-length window is recorded as-is
+	c := NewStatsCollector(testOps)
+	ws := c.NewWorkerStats()
+
+	at := time.Now()
+	ws.Record(OpInsert, 0.010, nil)
+	captureStdout(t, func() { c.print(at, time.Second, nil) })
+	ws.Record(OpInsert, 0.010, nil)
+	captureStdout(t, func() { c.print(at, time.Second, nil) }) // same instant → span 0
+
+	_, intervals, _, _ := c.Finalize()
+	if len(intervals) < 2 {
+		t.Fatalf("want at least 2 intervals, got %d", len(intervals))
+	}
+	zero := intervals[1]
+	if zero.EndSeconds != zero.StartSeconds {
+		t.Fatalf("expected a zero-span interval, got %.6f-%.6f", zero.StartSeconds, zero.EndSeconds)
+	}
+	if zero.OpsPerSec != 0 {
+		t.Errorf("zero-span interval rate: want 0, got %v", zero.OpsPerSec)
+	}
+	for _, o := range zero.Operations {
+		if o.OpsPerSec != 0 {
+			t.Errorf("op %s rate in a zero-span window: want 0, got %v", o.Op, o.OpsPerSec)
+		}
 	}
 }
 

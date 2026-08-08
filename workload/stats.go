@@ -30,10 +30,31 @@ import (
 // and snapshot() resets it every SUMMARY_INTERVAL_SECS, so it does not grow
 // over the life of a run. The Prometheus histogram in metrics/ is unaffected
 // and stays bucketed — that is the correct model for a time series.
+//
+// Invariant: sum(latencies) == count - errors, at every level (worker, window,
+// run total). Record maintains it, mergeInto preserves it under addition, and
+// snapshot preserves it under the struct copy. Only *successful* ops contribute
+// a latency — see Record for why — so an op that failed every time leaves
+// latencies nil, and that is how result.go decides to omit the latency block.
 type opStats struct {
 	count     int64
 	errors    int64
 	latencies map[int64]int64 // latency in microseconds → number of observations
+}
+
+// samples returns the number of latency observations, i.e. count - errors.
+// Callers use it to distinguish "no successful op was measured" from "every
+// measurement happened to be zero", which an all-zero LatencyStats cannot.
+//
+// Value receiver on purpose: the snapshot and total maps hold opStats by value,
+// and a map index is not addressable, so a pointer receiver would not be
+// callable on the very values this is meant to interrogate.
+func (s opStats) samples() int64 {
+	var n int64
+	for _, c := range s.latencies {
+		n += c
+	}
+	return n
 }
 
 // WorkerStats holds one worker's window stats. Owned by the worker goroutine;
@@ -58,7 +79,23 @@ func (ws *WorkerStats) Record(op string, durationSec float64, err error) {
 	s := ws.data[op]
 	s.count++
 	if err != nil {
+		// A failed op is counted but contributes no latency.
+		//
+		// This used to be the other way round, on the reasoning that an op which
+		// failed slowly is still evidence about how the server behaved. True in
+		// isolation, and wrong in aggregate: failures are overwhelmingly *fast*
+		// — "connection refused" or "too many clients" returns in microseconds
+		// without touching data — and with no backoff a failing database emits
+		// them in a flood. Mixed into one population they drag every percentile
+		// down, so the reported p99 IMPROVES as the server gets worse. For a
+		// tool whose whole job is comparing a before-tuning run against an
+		// after-tuning one, that inverts the conclusion.
+		//
+		// The failure is not hidden: count and errors are both reported, and
+		// count > errors is exactly the condition under which a latency block
+		// is emitted at all.
 		s.errors++
+		return
 	}
 	// Lazily allocated: snapshot() hands the previous map off to the collector
 	// and leaves a nil one behind, so ops that see no traffic in a window cost
@@ -236,14 +273,55 @@ func (c *StatsCollector) recordIntervalLocked(now time.Time, merged map[string]*
 		prev.Ops += ops
 		prev.Errors += errs
 		prev.EndSeconds = endSecs
-		if prevSpan := prev.EndSeconds - prev.StartSeconds; prevSpan > 0 {
-			prev.OpsPerSec = float64(prev.Ops) / prevSpan
-			for i := range prev.Operations {
-				if s, ok := merged[prev.Operations[i].Op]; ok {
-					prev.Operations[i].Count += s.count
-				}
-				prev.Operations[i].OpsPerSec = float64(prev.Operations[i].Count) / prevSpan
+		prevSpan := prev.EndSeconds - prev.StartSeconds
+
+		// Rebuilt in c.ops order rather than folded in place, so a merged interval
+		// keeps the same op ordering as its neighbours and two consecutive entries
+		// still line up when diffed. Appending the newcomers would have ordered a
+		// folded interval differently from every other one.
+		//
+		// An op idle during the predecessor window has no entry to fold into. Its
+		// ops still landed in prev.Ops above, so without carrying it over the per-op
+		// counts would stop summing to the interval total. Percentiles for such an
+		// op come from the sliver alone — the only measurement that exists for it.
+		//
+		// Counts are merged unconditionally; only the rate needs a non-zero span.
+		// Keeping the merge inside a span guard would reintroduce the same
+		// divergence it is here to prevent, on the degenerate window.
+		existing := make(map[string]IntervalOp, len(prev.Operations))
+		for _, o := range prev.Operations {
+			existing[o.Op] = o
+		}
+		rebuilt := make([]IntervalOp, 0, len(prev.Operations)+len(c.ops))
+		for _, op := range c.ops {
+			o, had := existing[op]
+			s, active := merged[op]
+			active = active && s.count > 0
+			if !had && !active {
+				continue
 			}
+			if !had {
+				keys, total := s.sortedKeys()
+				o = IntervalOp{
+					Op:    op,
+					P50MS: quantileFrom(s.latencies, keys, total, 0.50),
+					P95MS: quantileFrom(s.latencies, keys, total, 0.95),
+					P99MS: quantileFrom(s.latencies, keys, total, 0.99),
+				}
+			}
+			if active {
+				o.Count += s.count
+				o.Errors += s.errors
+			}
+			if prevSpan > 0 {
+				o.OpsPerSec = float64(o.Count) / prevSpan
+			}
+			rebuilt = append(rebuilt, o)
+		}
+		prev.Operations = rebuilt
+
+		if prevSpan > 0 {
+			prev.OpsPerSec = float64(prev.Ops) / prevSpan
 		}
 		c.lastBoundary = now
 		return
@@ -266,6 +344,7 @@ func (c *StatsCollector) recordIntervalLocked(now time.Time, merged map[string]*
 		operations = append(operations, IntervalOp{
 			Op:        op,
 			Count:     s.count,
+			Errors:    s.errors,
 			OpsPerSec: rate(s.count),
 			P50MS:     quantileFrom(s.latencies, keys, total, 0.50),
 			P95MS:     quantileFrom(s.latencies, keys, total, 0.95),
@@ -346,19 +425,17 @@ func (c *StatsCollector) print(now time.Time, window time.Duration, pool *pgxpoo
 	fmt.Printf("  30s summary [%s | +%s elapsed]\n", now.Format("15:04:05"), elapsed)
 	fmt.Printf("  total  %6s ops   %.1f ops/s   errors: %d\n",
 		commaf(totalOps), float64(totalOps)/windowSecs, totalErrors)
-	fmt.Printf("  ┌──────────────┬────────┬─────────┬────────┬────────┬────────┐\n")
-	fmt.Printf("  │ %-12s │ %6s │ %7s │ %6s │ %6s │ %6s │\n",
-		"op", "count", "ops/s", "p50 ms", "p95 ms", "p99 ms")
-	fmt.Printf("  ├──────────────┼────────┼─────────┼────────┼────────┼────────┤\n")
+	fmt.Printf("  ┌──────────────┬────────┬────────┬─────────┬────────┬────────┬────────┐\n")
+	fmt.Printf("  │ %-12s │ %6s │ %6s │ %7s │ %6s │ %6s │ %6s │\n",
+		"op", "count", "err", "ops/s", "p50 ms", "p95 ms", "p99 ms")
+	fmt.Printf("  ├──────────────┼────────┼────────┼─────────┼────────┼────────┼────────┤\n")
 	for _, op := range c.ops {
 		s := merged[op]
-		p50 := percentile(s, 0.50)
-		p95 := percentile(s, 0.95)
-		p99 := percentile(s, 0.99)
-		fmt.Printf("  │ %-12s │ %6d │ %7.1f │ %6.1f │ %6.1f │ %6.1f │\n",
-			op, s.count, float64(s.count)/windowSecs, p50, p95, p99)
+		fmt.Printf("  │ %-12s │ %6d │ %6d │ %7.1f │ %6s │ %6s │ %6s │\n",
+			op, s.count, s.errors, float64(s.count)/windowSecs,
+			latencyCell(s, 0.50), latencyCell(s, 0.95), latencyCell(s, 0.99))
 	}
-	fmt.Printf("  └──────────────┴────────┴─────────┴────────┴────────┴────────┘\n")
+	fmt.Printf("  └──────────────┴────────┴────────┴─────────┴────────┴────────┴────────┘\n")
 
 	if pool != nil {
 		stat := pool.Stat()
@@ -378,6 +455,19 @@ func (c *StatsCollector) print(now time.Time, window time.Duration, pool *pgxpoo
 func percentile(s *opStats, q float64) float64 {
 	keys, total := s.sortedKeys()
 	return quantileFrom(s.latencies, keys, total, q)
+}
+
+// latencyCell renders one percentile for the console table, or "—" when the op
+// has no successful observations to summarise. Printing 0.0 there would read as
+// "instant" for what is in fact an op that failed every time — the same
+// misreading the JSON avoids by omitting the latency block entirely. An idle
+// window and a wholly-failed one both render "—"; the count and err cells
+// alongside distinguish them.
+func latencyCell(s *opStats, q float64) string {
+	if s.samples() == 0 {
+		return "—"
+	}
+	return fmt.Sprintf("%.1f", percentile(s, q))
 }
 
 // sortedKeys returns the distinct latencies in ascending order plus the total

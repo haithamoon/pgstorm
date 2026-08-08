@@ -42,3 +42,41 @@ func TestRecordOp_countsOkAndError(t *testing.T) {
 		t.Errorf("error count: want 1, got %v", v)
 	}
 }
+
+func histogramSampleCount(t *testing.T, o prometheus.Observer) uint64 {
+	t.Helper()
+	m, ok := o.(prometheus.Metric)
+	if !ok {
+		t.Fatalf("observer %T is not a prometheus.Metric", o)
+	}
+	var pb dto.Metric
+	if err := m.Write(&pb); err != nil {
+		t.Fatalf("histogram Write: %v", err)
+	}
+	return pb.GetHistogram().GetSampleCount()
+}
+
+// TestRecordOp_errorsAreNotObserved keeps the Prometheus histogram the same
+// population as the exact latency map in workload/stats.go. If failures were
+// observed here, the Grafana quantile panels would drop toward zero during an
+// outage — telling the opposite story to the result JSON computed from the same
+// run.
+func TestRecordOp_errorsAreNotObserved(t *testing.T) {
+	const op = "unit_test_op_duration" // unique label, so the series starts at 0
+
+	OpsTotal.DeleteLabelValues(op, "ok")
+	OpsTotal.DeleteLabelValues(op, "error")
+	OpDuration.DeleteLabelValues(op)
+
+	RecordOp(op, 0.010, nil)
+	RecordOp(op, 0.020, nil)
+	RecordOp(op, 0.030, fmt.Errorf("boom"))
+
+	if got := histogramSampleCount(t, OpDuration.WithLabelValues(op)); got != 2 {
+		t.Errorf("observed samples: want 2 (successes only), got %d", got)
+	}
+	// The failure is still counted — excluded from latency, not hidden.
+	if v := counterValue(t, OpsTotal.WithLabelValues(op, "error")); v != 1 {
+		t.Errorf("error count: want 1, got %v", v)
+	}
+}

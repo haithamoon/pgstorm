@@ -287,23 +287,23 @@ It records the whole run — not the last window — alongside the settings that
 ```json
 {
   "profile": "oltp-jsonb",
-  "started_at": "2026-08-07T22:51:41.696718Z",
-  "ended_at": "2026-08-07T22:52:01.704932Z",
-  "duration_seconds": 20.008396416,
+  "started_at": "2026-08-08T11:38:16.543009Z",
+  "ended_at": "2026-08-08T11:39:16.548733Z",
+  "duration_seconds": 60.005367334,
   "config": {
-    "workers": 4, "toast_pct": 20, "min_payload_kb": 8, "max_payload_kb": 16,
+    "workers": 20, "toast_pct": 20, "min_payload_kb": 8, "max_payload_kb": 16,
     "op_weights": { "insert": 35, "read_join": 20, "read_simple": 15, "update": 15, "delete": 10, "read_by_ip": 5 }
   },
-  "totals": { "ops": 6184, "errors": 4, "ops_per_sec": 309.07 },
+  "totals": { "ops": 109711, "errors": 0, "ops_per_sec": 1828.35 },
   "operations": [
     {
       "op": "delete",
-      "count": 636,
-      "errors": 1,
-      "ops_per_sec": 31.79,
+      "count": 10897,
+      "errors": 0,
+      "ops_per_sec": 181.6,
       "latency": {
-        "min_ms": 0.279, "mean_ms": 18.396, "p50_ms": 18.374,
-        "p95_ms": 20.836, "p99_ms": 24.34, "p999_ms": 36.583, "max_ms": 36.583
+        "min_ms": 0.337, "mean_ms": 10.266, "p50_ms": 7.948,
+        "p95_ms": 26.535, "p99_ms": 40.271, "p999_ms": 74.159, "max_ms": 147.229
       }
     }
   ]
@@ -311,6 +311,13 @@ It records the whole run — not the last window — alongside the settings that
 ```
 
 Latency figures are computed from every observation rather than from histogram buckets, so they are real measured values with no interpolation and no upper bound — a p99 of 45 s is reported as 45 s, not clipped.
+
+**Latency covers successful operations only.** A failure returns in microseconds without touching data, so counting it as a latency sample would pull the percentiles down exactly as the database got worse — a broken "after" run could read as a latency improvement. Failures are still fully reported in `errors`; they are separated, not hidden. Two consequences:
+
+- `latency` is **omitted entirely** for an op where every attempt failed (`count == errors`). There is nothing to summarise, and an all-zero block would read as "instant".
+- `ops_per_sec` counts **attempts**, failures included. A database that is rejecting connections will show a *high* rate next to a high error count, because failing is fast.
+
+A clean run should report `errors: 0`. Treat any non-zero count as something to explain before trusting the rest of the document — if a meaningful share of attempts failed, the two runs you are comparing did different amounts of work.
 
 The document also brackets the run with the size of the tracked tables, because pgstorm grows the database as it runs:
 
@@ -355,7 +362,9 @@ Finally, every summary window is kept as a series, so you can see *when* during 
 ]
 ```
 
-This is where throughput sagging as the dataset grows, or latency stepping up when autovacuum starts work, becomes visible without standing up Prometheus. Each entry carries count, rate and p50/p95/p99 per operation — the same figures the console prints. The interval op counts sum exactly to `totals`.
+This is where throughput sagging as the dataset grows, or latency stepping up when autovacuum starts work, becomes visible without standing up Prometheus. Each entry carries count, errors, rate and p50/p95/p99 per operation — the same figures the console prints. The interval counts sum exactly to `totals`.
+
+`errors` is omitted from a window where it is zero, which is most of them. Where it is present and equals `count`, that op failed outright for the whole window and its percentiles are `0` because there was nothing to measure — the adjacent counts are what tell you so.
 
 Notes:
 
@@ -400,6 +409,8 @@ Stated plainly, because a benchmark whose weaknesses are hidden is worth less th
 
 **Reported percentiles are optimistic under load.** pgstorm is a *closed-loop* generator: a fixed pool of workers each block on their operation before issuing the next. When the server stalls, pgstorm issues fewer operations, so the stall is under-sampled and p95/p99 look better than a user would experience. This is called coordinated omission. Adding replicas raises concurrency but does not remove it — only an open-loop generator that records intended issue time would. **Treat pgstorm's tail latencies as a lower bound.**
 
+**How long failures took is not recorded anywhere.** Latency covers successful operations only — mixing failures in is strictly worse, since a flood of microsecond errors makes a degrading server look faster. But the information is genuinely lost: a `statement_timeout` firing at 30 s shows up only as a bump in `errors`, not as a slow observation. If you are diagnosing timeouts, read the error count and the Postgres logs, not the latency block.
+
 **The workload is synthetic.** Payloads are generated JSON with incompressible bodies, sized to exercise TOAST. They resemble production data in shape and size, not in content or access distribution.
 
 **There is no think time by default.** Workers issue their next operation immediately (`THINK_TIME_MS=0`), which is a stress pattern, not a simulation of user behaviour.
@@ -422,7 +433,7 @@ All metrics are prefixed with `pgstorm_`. The `/metrics` endpoint also exposes G
 |---|---|---|---|
 | `pgstorm_ops_total` | Counter | `op`, `status` | Total operations completed; `status` is `ok` or `error` |
 | `pgstorm_ops_skipped_total` | Counter | `op` | Operations that did **no** database work and were skipped — cold-start empty ring, or `FOR UPDATE SKIP LOCKED` contention. Tracked separately so they don't count as ~0 ms successes and distort latency/throughput |
-| `pgstorm_op_duration_seconds` | Histogram | `op` | Operation latency; buckets at 1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000 ms |
+| `pgstorm_op_duration_seconds` | Histogram | `op` | Latency of **successful** operations; buckets at 1, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 30000 ms. Failures are excluded (they return in microseconds and would drag the quantiles down as the server degrades), so `_count` does **not** equal `sum(pgstorm_ops_total)` — take the error rate from `ops_total{status="error"}`. During a total outage the Grafana latency panels go blank rather than to zero, because nothing succeeded |
 | `pgstorm_workers_active` | Gauge | — | Number of operations currently in flight |
 
 ### Connection Pool
