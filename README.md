@@ -324,6 +324,27 @@ The document also brackets the run with the size of the tracked tables, because 
 
 Sizes come from `pg_total_relation_size`, so they include TOAST and index storage. Without them a result cannot be compared against another, because the two runs were not measuring the same database. The key is omitted entirely if the size could not be read, so a missing measurement never reads as an empty database.
 
+It also records the server it ran against, since which Postgres and how it is configured moves the numbers more than most of pgstorm's own settings:
+
+```json
+"server": {
+  "version": "16.14 (Debian 16.14-1.pgdg13+1)",
+  "settings": {
+    "shared_buffers": "16384 8kB",
+    "max_wal_size": "1024 MB",
+    "checkpoint_timeout": "300 s",
+    "synchronous_commit": "on",
+    "full_page_writes": "on",
+    "default_toast_compression": "pglz",
+    "autovacuum": "on"
+  }
+}
+```
+
+A curated set of about fifteen settings, not everything `pg_settings` knows — a full dump is several hundred rows and buries the ones that matter. `default_toast_compression` is worth noting: pgstorm's payloads are built to defeat pglz, so a server using lz4 exercises TOAST differently than the design assumes.
+
+**Credentials are never written.** `PG_DSN` contains the database password and is deliberately excluded from the document, along with any setting that could carry a connection string. A test enforces this so it cannot regress.
+
 Notes:
 
 - **Opt-in.** Leave `RESULT_JSON_PATH` empty (the default) and nothing is written.

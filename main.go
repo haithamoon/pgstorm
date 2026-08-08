@@ -104,6 +104,7 @@ func main() {
 	// Only needed when a result will actually be written.
 	var datasetStart workload.DatasetSize
 	var datasetOK bool
+	var server *workload.ServerInfo
 	if cfg.ResultJSONPath != "" {
 		datasetStart, err = workload.SnapshotDataset(ctx, pool, profile.Schema().TrackedTables)
 		if err != nil {
@@ -112,6 +113,16 @@ func main() {
 			datasetOK = true
 			log.Printf("dataset at start: %.1f MB, %d live tuples",
 				float64(datasetStart.TotalBytes)/(1<<20), datasetStart.LiveTuples)
+		}
+
+		// Which Postgres, and how it is configured, moves the numbers more than
+		// most of pgstorm's own knobs. Read once here: these settings are static
+		// for the run, and this is the state it actually executed under.
+		if info, sErr := workload.SnapshotServerInfo(ctx, pool); sErr != nil {
+			log.Printf("server settings: %v (result will omit server)", sErr)
+		} else {
+			server = &info
+			log.Printf("postgres %s, %d settings recorded", info.Version, len(info.Settings))
 		}
 	}
 
@@ -194,7 +205,7 @@ func main() {
 			}
 		}
 
-		result := workload.BuildRunResult(totals, started, ended, cfg, ops, dataset)
+		result := workload.BuildRunResult(totals, started, ended, cfg, ops, dataset, server)
 		if err := workload.WriteRunResult(cfg.ResultJSONPath, result); err != nil {
 			log.Printf("write result json: %v", err)
 		} else {

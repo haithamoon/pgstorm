@@ -12,6 +12,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -314,7 +315,7 @@ func TestBuildRunResult_totalsAndRates(t *testing.T) {
 	totals[OpInsert] = opStats{count: 100, errors: 3, latencies: totals[OpInsert].latencies}
 	totals[OpReadSimple] = opStats{count: 50, errors: 0, latencies: totals[OpReadSimple].latencies}
 
-	r := BuildRunResult(totals, started, ended, testCfg(), testWeights, nil)
+	r := BuildRunResult(totals, started, ended, testCfg(), testWeights, nil, nil)
 
 	if r.DurationSeconds != 10 {
 		t.Errorf("duration: want 10, got %v", r.DurationSeconds)
@@ -348,7 +349,7 @@ func TestBuildRunResult_totalsAndRates(t *testing.T) {
 func TestBuildRunResult_zeroDurationDoesNotProduceInfinity(t *testing.T) {
 	now := time.Now()
 	totals := map[string]opStats{OpInsert: *statsWith([2]float64{10, 5})}
-	r := BuildRunResult(totals, now, now, testCfg(), testWeights, nil)
+	r := BuildRunResult(totals, now, now, testCfg(), testWeights, nil, nil)
 
 	if r.Totals.OpsPerSec != 0 {
 		t.Errorf("zero duration should give 0 ops/sec, got %v", r.Totals.OpsPerSec)
@@ -361,7 +362,7 @@ func TestBuildRunResult_zeroDurationDoesNotProduceInfinity(t *testing.T) {
 
 func TestBuildRunResult_capturesConfigAndWeights(t *testing.T) {
 	cfg := testCfg()
-	r := BuildRunResult(map[string]opStats{}, time.Now(), time.Now().Add(time.Second), cfg, testWeights, nil)
+	r := BuildRunResult(map[string]opStats{}, time.Now(), time.Now().Add(time.Second), cfg, testWeights, nil, nil)
 
 	if r.Config.Workers != cfg.Workers || r.Config.ToastPct != cfg.ToastPct {
 		t.Errorf("config not carried through: %+v", r.Config)
@@ -380,14 +381,14 @@ func TestBuildRunResult_capturesConfigAndWeights(t *testing.T) {
 func TestBuildRunResult_timesAreUTC(t *testing.T) {
 	loc := time.FixedZone("UTC+7", 7*3600)
 	started := time.Date(2026, 8, 8, 12, 0, 0, 0, loc)
-	r := BuildRunResult(map[string]opStats{}, started, started.Add(time.Second), testCfg(), testWeights, nil)
+	r := BuildRunResult(map[string]opStats{}, started, started.Add(time.Second), testCfg(), testWeights, nil, nil)
 	if r.StartedAt.Location() != time.UTC || r.EndedAt.Location() != time.UTC {
 		t.Errorf("timestamps should be normalised to UTC so results compare across machines")
 	}
 }
 
 func TestBuildRunResult_emptyRun(t *testing.T) {
-	r := BuildRunResult(map[string]opStats{}, time.Now(), time.Now().Add(time.Second), testCfg(), nil, nil)
+	r := BuildRunResult(map[string]opStats{}, time.Now(), time.Now().Add(time.Second), testCfg(), nil, nil, nil)
 	if r.Totals.Ops != 0 || len(r.Operations) != 0 {
 		t.Errorf("empty run should produce zero totals and no operations, got %+v", r.Totals)
 	}
@@ -536,7 +537,7 @@ func TestSnapshotDataset_errorPaths(t *testing.T) {
 
 func TestBuildRunResult_datasetOmittedWhenUnavailable(t *testing.T) {
 	r := BuildRunResult(map[string]opStats{}, time.Now(), time.Now().Add(time.Second),
-		testCfg(), testWeights, nil)
+		testCfg(), testWeights, nil, nil)
 	if r.Dataset != nil {
 		t.Error("dataset should be nil when it could not be measured")
 	}
@@ -557,7 +558,7 @@ func TestBuildRunResult_datasetIncludedWhenPresent(t *testing.T) {
 		GrowthBytes: 3000,
 	}
 	r := BuildRunResult(map[string]opStats{}, time.Now(), time.Now().Add(time.Second),
-		testCfg(), testWeights, ds)
+		testCfg(), testWeights, ds, nil)
 
 	raw, err := json.Marshal(r)
 	if err != nil {
@@ -581,6 +582,203 @@ func TestBuildRunResult_datasetIncludedWhenPresent(t *testing.T) {
 	}
 }
 
+// ── SnapshotServerInfo ───────────────────────────────────────────────────────
+
+func TestSnapshotServerInfo_versionAndSettings(t *testing.T) {
+	pool := &scriptedPool{rows: &scriptedRows{rows: [][]any{
+		{"server_version", "16.4", ""},
+		{"shared_buffers", "16384", "8kB"},
+		{"synchronous_commit", "on", ""},
+		{"default_toast_compression", "pglz", ""},
+		{"autovacuum_naptime", "60", "s"},
+	}}}
+
+	got, err := SnapshotServerInfo(context.Background(), pool)
+	if err != nil {
+		t.Fatalf("SnapshotServerInfo: %v", err)
+	}
+	if got.Version != "16.4" {
+		t.Errorf("version: want 16.4, got %q", got.Version)
+	}
+	// server_version is surfaced as its own field, not duplicated in the map.
+	if _, dup := got.Settings["server_version"]; dup {
+		t.Error("server_version should not also appear in Settings")
+	}
+	// Units are appended when Postgres reports one...
+	if got.Settings["shared_buffers"] != "16384 8kB" {
+		t.Errorf("shared_buffers: want %q, got %q", "16384 8kB", got.Settings["shared_buffers"])
+	}
+	if got.Settings["autovacuum_naptime"] != "60 s" {
+		t.Errorf("autovacuum_naptime: want %q, got %q", "60 s", got.Settings["autovacuum_naptime"])
+	}
+	// ...and never leave a trailing space when it is null.
+	if got.Settings["synchronous_commit"] != "on" {
+		t.Errorf("synchronous_commit: want %q, got %q", "on", got.Settings["synchronous_commit"])
+	}
+	if !pool.rows.closed {
+		t.Error("rows should be closed")
+	}
+}
+
+func TestSnapshotServerInfo_queriesTheCuratedAllowList(t *testing.T) {
+	pool := &scriptedPool{rows: &scriptedRows{}}
+	if _, err := SnapshotServerInfo(context.Background(), pool); err != nil {
+		t.Fatalf("SnapshotServerInfo: %v", err)
+	}
+	if !strings.Contains(pool.lastSQL, "pg_settings") {
+		t.Errorf("expected a pg_settings query, got: %s", pool.lastSQL)
+	}
+	// COALESCE matters: unit is NULL for every non-numeric setting, and without
+	// it the scan fails on most of the list.
+	if !strings.Contains(pool.lastSQL, "COALESCE(unit") {
+		t.Errorf("unit must be coalesced or non-numeric settings fail to scan: %s", pool.lastSQL)
+	}
+	if len(pool.lastArgs) != 1 {
+		t.Fatalf("want the allow-list passed as one arg, got %d", len(pool.lastArgs))
+	}
+	names, ok := pool.lastArgs[0].([]string)
+	if !ok {
+		t.Fatalf("want []string arg, got %T", pool.lastArgs[0])
+	}
+	for _, required := range []string{
+		"server_version", "shared_buffers", "max_wal_size",
+		"synchronous_commit", "full_page_writes", "default_toast_compression",
+	} {
+		if !slices.Contains(names, required) {
+			t.Errorf("allow-list is missing %q, which materially changes results", required)
+		}
+	}
+}
+
+func TestSnapshotServerInfo_absentSettingIsNotAnError(t *testing.T) {
+	// Version-specific settings simply do not come back on older servers. That
+	// must degrade to a missing key, not a failure.
+	pool := &scriptedPool{rows: &scriptedRows{rows: [][]any{
+		{"server_version", "13.9", ""},
+	}}}
+	got, err := SnapshotServerInfo(context.Background(), pool)
+	if err != nil {
+		t.Fatalf("a server missing some settings must not error: %v", err)
+	}
+	if got.Version != "13.9" {
+		t.Errorf("version: want 13.9, got %q", got.Version)
+	}
+	if _, present := got.Settings["default_toast_compression"]; present {
+		t.Error("a setting the server did not report should be absent, not fabricated")
+	}
+	if got.Settings == nil {
+		t.Error("Settings should be an empty map, not nil, so it encodes as {}")
+	}
+}
+
+func TestSnapshotServerInfo_errorPaths(t *testing.T) {
+	tests := []struct {
+		name string
+		pool *scriptedPool
+		want string
+	}{
+		{"query fails", &scriptedPool{queryErr: errors.New("boom")}, "query server settings"},
+		{"scan fails", &scriptedPool{rows: &scriptedRows{
+			rows: [][]any{{"shared_buffers", "1", ""}}, scanErr: errors.New("bad"),
+		}}, "scan server settings"},
+		{"iteration fails", &scriptedPool{rows: &scriptedRows{err: errors.New("torn")}}, "read server settings"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := SnapshotServerInfo(context.Background(), tc.pool)
+			if err == nil {
+				t.Fatal("expected an error")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error should name the failing step %q, got: %v", tc.want, err)
+			}
+		})
+	}
+}
+
+func TestBuildRunResult_serverOmittedWhenUnavailable(t *testing.T) {
+	r := BuildRunResult(map[string]opStats{}, time.Now(), time.Now().Add(time.Second),
+		testCfg(), testWeights, nil, nil)
+	if r.Server != nil {
+		t.Error("server should be nil when it could not be read")
+	}
+	raw, err := json.Marshal(r)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	// Absent, not zeroed — "not measured" must not read as "a server with no
+	// settings".
+	if strings.Contains(string(raw), "\"server\"") {
+		t.Errorf("server key should be omitted entirely, got: %s", raw)
+	}
+}
+
+func TestBuildRunResult_serverRoundTrips(t *testing.T) {
+	info := &ServerInfo{
+		Version:  "16.4",
+		Settings: map[string]string{"shared_buffers": "16384 8kB", "synchronous_commit": "on"},
+	}
+	r := BuildRunResult(map[string]opStats{}, time.Now(), time.Now().Add(time.Second),
+		testCfg(), testWeights, nil, info)
+
+	raw, err := json.Marshal(r)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var got RunResult
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Server == nil {
+		t.Fatal("server lost in round-trip")
+	}
+	if got.Server.Version != "16.4" {
+		t.Errorf("version: want 16.4, got %q", got.Server.Version)
+	}
+	if got.Server.Settings["shared_buffers"] != "16384 8kB" {
+		t.Errorf("settings lost: %v", got.Server.Settings)
+	}
+}
+
+func TestRunResult_neverLeaksCredentials(t *testing.T) {
+	// Result files get shared. PG_DSN carries the password, so no field may
+	// carry it — directly or via a setting name that happens to hold a
+	// connection string. This guards against a future addition to
+	// capturedSettings or RunConfig quietly leaking one.
+	const secret = "sup3rs3cr3t-pw"
+	cfg := testCfg()
+	cfg.PGDSN = "postgres://loadgen:" + secret + "@db.internal:5432/loadtest?sslmode=disable"
+
+	info := &ServerInfo{Version: "16.4", Settings: map[string]string{}}
+	for _, name := range capturedSettings {
+		info.Settings[name] = "value-for-" + name
+	}
+
+	r := BuildRunResult(
+		map[string]opStats{OpInsert: *statsWith([2]float64{1, 1})},
+		time.Now(), time.Now().Add(time.Second), cfg, testWeights,
+		&DatasetSnapshot{}, info,
+	)
+	raw, err := json.Marshal(r)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(raw), secret) {
+		t.Errorf("result document contains the database password:\n%s", raw)
+	}
+	if strings.Contains(string(raw), "postgres://") {
+		t.Errorf("result document contains a connection string:\n%s", raw)
+	}
+	// The allow-list itself must never name a credential-bearing setting.
+	for _, name := range capturedSettings {
+		for _, banned := range []string{"password", "conninfo", "connection_string", "primary_conninfo"} {
+			if strings.Contains(name, banned) {
+				t.Errorf("capturedSettings includes %q, which can carry credentials", name)
+			}
+		}
+	}
+}
+
 // ── WriteRunResult ───────────────────────────────────────────────────────────
 
 func TestWriteRunResult_roundTrips(t *testing.T) {
@@ -589,7 +787,7 @@ func TestWriteRunResult_roundTrips(t *testing.T) {
 
 	started := time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC)
 	totals := map[string]opStats{OpInsert: *statsWith([2]float64{10, 4})}
-	want := BuildRunResult(totals, started, started.Add(4*time.Second), testCfg(), testWeights, nil)
+	want := BuildRunResult(totals, started, started.Add(4*time.Second), testCfg(), testWeights, nil, nil)
 
 	if err := WriteRunResult(path, want); err != nil {
 		t.Fatalf("WriteRunResult: %v", err)
@@ -639,12 +837,12 @@ func TestWriteRunResult_overwritesAtomically(t *testing.T) {
 	path := filepath.Join(dir, "result.json")
 
 	first := BuildRunResult(map[string]opStats{OpInsert: {count: 1}},
-		time.Now(), time.Now().Add(time.Second), testCfg(), testWeights, nil)
+		time.Now(), time.Now().Add(time.Second), testCfg(), testWeights, nil, nil)
 	if err := WriteRunResult(path, first); err != nil {
 		t.Fatalf("first write: %v", err)
 	}
 	second := BuildRunResult(map[string]opStats{OpInsert: {count: 999}},
-		time.Now(), time.Now().Add(time.Second), testCfg(), testWeights, nil)
+		time.Now(), time.Now().Add(time.Second), testCfg(), testWeights, nil, nil)
 	if err := WriteRunResult(path, second); err != nil {
 		t.Fatalf("second write: %v", err)
 	}
