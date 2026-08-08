@@ -83,6 +83,12 @@ func Load() (*Config, error) {
 	if cfg.ToastPct < 0 || cfg.ToastPct > 100 {
 		return nil, fmt.Errorf("TOAST_PCT must be between 0 and 100, got %d", cfg.ToastPct)
 	}
+	// Only `> 0` bounds the run, so a negative would silently mean "forever" —
+	// the opposite of what someone typing -1 expects. 0 stays valid and means
+	// "run until stopped".
+	if cfg.RunDurationSecs < 0 {
+		return nil, fmt.Errorf("RUN_DURATION_SECS must be >= 0 (0 = run until stopped), got %d", cfg.RunDurationSecs)
+	}
 
 	for _, v := range []struct {
 		name string

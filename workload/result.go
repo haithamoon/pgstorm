@@ -175,12 +175,35 @@ func SnapshotServerInfo(ctx context.Context, pool DBPool) (ServerInfo, error) {
 	return out, nil
 }
 
+// How a run ended. Recorded because the primary workflow is measuring, tuning,
+// then measuring again: an "after" run cut short by Ctrl-C would otherwise look
+// just like one that ran its course, and quietly invalidate the comparison.
+const (
+	// StoppedByDuration means the configured RUN_DURATION_SECS elapsed.
+	StoppedByDuration = "duration"
+	// StoppedBySignal means SIGINT or SIGTERM arrived first. Always the case for
+	// an unbounded run, which is not a fault — it was never going to stop on its
+	// own, which is why this is not modelled as a "completed" boolean.
+	StoppedBySignal = "signal"
+)
+
+// RunMeta carries what is known about a run beyond its measurements. Grouped so
+// BuildRunResult keeps a readable signature as these accumulate.
+type RunMeta struct {
+	// Dataset and Server are nil when the corresponding measurement failed;
+	// their fields are then omitted from the document rather than zeroed.
+	Dataset   *DatasetSnapshot
+	Server    *ServerInfo
+	StoppedBy string
+}
+
 // RunResult is the top-level document written at the end of a run.
 type RunResult struct {
 	Profile         string     `json:"profile"`
 	StartedAt       time.Time  `json:"started_at"`
 	EndedAt         time.Time  `json:"ended_at"`
 	DurationSeconds float64    `json:"duration_seconds"`
+	StoppedBy       string     `json:"stopped_by,omitempty"`
 	Config          RunConfig  `json:"config"`
 	Totals          RunTotals  `json:"totals"`
 	Operations      []OpResult `json:"operations"`
@@ -234,16 +257,14 @@ func SnapshotDataset(ctx context.Context, pool DBPool, tables []string) (Dataset
 // (a run that ended in the same instant it started, which only happens in
 // tests) yields zero rates rather than an infinity that would not survive a
 // JSON round-trip.
-// dataset and server may each be nil when the corresponding measurement could
-// not be taken; those fields are then omitted from the document rather than
-// written as zeros.
+// Fields of meta that were not measured are omitted from the document rather
+// than written as zeros — see RunMeta.
 func BuildRunResult(
 	totals map[string]opStats,
 	started, ended time.Time,
 	cfg *config.Config,
 	ops []WeightedOp,
-	dataset *DatasetSnapshot,
-	server *ServerInfo,
+	meta RunMeta,
 ) RunResult {
 	duration := ended.Sub(started).Seconds()
 	rate := func(n int64) float64 {
@@ -303,10 +324,11 @@ func BuildRunResult(
 			RunDurationSecs: cfg.RunDurationSecs,
 			OpWeights:       weights,
 		},
+		StoppedBy:  meta.StoppedBy,
 		Totals:     t,
 		Operations: operations,
-		Dataset:    dataset,
-		Server:     server,
+		Dataset:    meta.Dataset,
+		Server:     meta.Server,
 	}
 }
 

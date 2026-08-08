@@ -106,6 +106,36 @@ func TestLoad_toastPctOutOfRangeRejected(t *testing.T) {
 	}
 }
 
+func TestLoad_runDurationRejectsNegative(t *testing.T) {
+	// Only `> 0` bounds the run, so before validation a negative silently meant
+	// "run forever" — the opposite of what someone typing -1 expects.
+	for _, v := range []string{"-1", "-900"} {
+		t.Setenv("RUN_DURATION_SECS", v)
+		_, err := Load()
+		if err == nil || !strings.Contains(err.Error(), "RUN_DURATION_SECS") {
+			t.Fatalf("want RUN_DURATION_SECS error for %s, got %v", v, err)
+		}
+	}
+}
+
+func TestLoad_runDurationZeroAndPositiveAccepted(t *testing.T) {
+	// 0 stays valid and means "run until stopped" — the right default for a
+	// diagnostic tool, deliberately unchanged.
+	for _, tc := range []struct {
+		env  string
+		want int
+	}{{"0", 0}, {"900", 900}} {
+		t.Setenv("RUN_DURATION_SECS", tc.env)
+		cfg, err := Load()
+		if err != nil {
+			t.Fatalf("RUN_DURATION_SECS=%s should be valid, got %v", tc.env, err)
+		}
+		if cfg.RunDurationSecs != tc.want {
+			t.Errorf("RUN_DURATION_SECS=%s: want %d, got %d", tc.env, tc.want, cfg.RunDurationSecs)
+		}
+	}
+}
+
 func TestLoad_actorPoolDefaults(t *testing.T) {
 	cfg, err := Load()
 	if err != nil {

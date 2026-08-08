@@ -44,7 +44,7 @@ pgstorm answers a different question. `pgbench`'s default TPC-B workload uses fo
 | Deletes | None in the default script | Batched deletes, driving real dead-tuple churn |
 | Server internals | Not exposed — you instrument separately | `pg_stat_wal`, `pg_stat_bgwriter`/`pg_stat_checkpointer`, `pg_stat_user_tables`, `pg_stat_activity` exported to Prometheus |
 | Row selection | Uniform random | Ring buffer of recent IDs — no `ORDER BY random()` scans |
-| Result comparability | Excellent | Low — there is no published result corpus yet |
+| What results compare | Your database against everyone else's | Your database against itself, before and after a change |
 
 **Reach for `pgbench`** when you want a comparable TPS number.
 
@@ -356,19 +356,29 @@ Notes:
 
 ## Methodology
 
-If you intend to compare two pgstorm results, or publish one, these are the things that decide whether the comparison means anything.
+pgstorm is built for one loop: **measure your database, change something, measure again, and see whether it actually helped.** These are the things that decide whether your "after" is honestly comparable to your "before".
 
-**Do not let the client be the bottleneck.** pgstorm and Postgres competing for the same cores measures your laptop, not your database. Run the generator on a separate machine, or check that it is not CPU-saturated. State what you ran it on.
+**Fix the duration.** Set `RUN_DURATION_SECS` and use the same value on both sides. A 5-minute run and a 20-minute run are not comparable — pgstorm grows the database as it runs, so the longer one ends up working against more data. Leaving it at `0` (run until stopped) means the length is whenever you happened to press Ctrl-C; pgstorm warns if you do that while writing a result.
 
-**Keep the network out of it.** Run in the same region — ideally the same availability zone — as the target. A few milliseconds of round-trip dominates operations that take single-digit milliseconds server-side, and the effect looks exactly like a slow database.
+**Wipe between runs.** `docker compose down && rm -rf ./pgdata && docker compose up --build`. Otherwise the second run starts on top of the first one's data and is slower for that reason alone, not because of anything you changed.
 
-**Report the dataset, not just the duration.** pgstorm starts from whatever is already there and grows as it runs, so two runs of the same length on different hardware end at different sizes. The `dataset` block in the result file exists for this; quote it.
+**Change one thing per round.** Tune `shared_buffers`, or the op mix, or `TOAST_PCT` — not several at once, or you cannot attribute the difference to any of them.
 
-**Change one thing at a time.** The op mix, `TOAST_PCT`, payload sizes, `CREATE_INDEXES` and worker count all move the numbers substantially. The result file records them so a reader can tell what was actually compared.
+**Repeat each side.** One run against one run is noise. Run each configuration two or three times and compare the ranges; do not chase a few percent.
 
-**Publish the untuned run too.** If you tuned Postgres, include a stock-configuration run alongside it. Tuned-only numbers are not interpretable, because the reader cannot tell how much came from the tuning.
+**Do not let the client be the bottleneck.** If pgstorm and Postgres are fighting for the same cores, you are measuring your laptop, not your database. Check the generator is not CPU-saturated, or run it on a separate machine.
 
-**Repeat the run.** A first run against a cold cache is not the same as a third against a warm one, and bloat accumulates across runs without a wipe. Report the spread rather than the best number — for pgstorm the spread is itself a finding.
+**Diff the two result files.** This is the point of `RESULT_JSON_PATH`. The `config` and `server` blocks record what you changed — including the actual Postgres settings in force — and `totals` plus the per-op `latency` record what it bought you:
+
+```bash
+RESULT_JSON_PATH=results/before.json docker compose up --build
+# ...tune postgres, wipe pgdata...
+RESULT_JSON_PATH=results/after.json  docker compose up --build
+
+diff <(jq -S . results/before.json) <(jq -S . results/after.json)
+```
+
+Check `stopped_by` in both while you are there. If one says `signal`, that run was cut short and its numbers cover less time than you think.
 
 ---
 
@@ -384,9 +394,9 @@ Stated plainly, because a benchmark whose weaknesses are hidden is worth less th
 
 **Results are per-process.** Under `--scale loadgen=N` each replica writes its own result covering its own operations. There is no cluster-wide aggregation; the `dataset` block is the shared database and will look identical across replicas.
 
-**There is no scale factor.** Unlike `pgbench -s`, pgstorm has no way to preload to a target size, so the dataset is a by-product of run length and machine speed rather than something you set. This is the biggest obstacle to comparing results across machines and is why the `dataset` block matters.
+**There is no scale factor.** Unlike `pgbench -s`, pgstorm cannot preload to a target size — the dataset is a by-product of how long the run lasted rather than something you set. This is a deliberate omission, not a gap waiting to be filled. The practical consequence is that a longer run is working against more data than a shorter one, which is why fixing `RUN_DURATION_SECS` and wiping between runs matters, and why every result records its `dataset` block.
 
-**No published result corpus exists yet.** There is nothing authoritative to compare your numbers against.
+**Numbers are not comparable across different machines.** pgstorm is for comparing a database against itself before and after a change. Two results from different hardware, or different Postgres instances, are not measuring the same thing — the tool makes no attempt to normalise for that.
 
 ---
 
@@ -540,4 +550,4 @@ pgstorm is licensed under the **Apache License 2.0** (`Apache-2.0`).
 
 Copyright (C) 2026 Haitham Gadelrab. See the [LICENSE](LICENSE) file for the full text.
 
-Apache-2.0 was chosen deliberately: a benchmark is only useful if the people being benchmarked can run it. Permissive licensing means managed-Postgres vendors and companies with policies against copyleft can use pgstorm and publish results without legal review.
+Apache-2.0 was chosen deliberately. A tool a DBA cannot get approved is a tool they cannot use, and many organisations have blanket policies against copyleft licences regardless of whether the obligations would ever actually apply. Permissive licensing keeps pgstorm usable inside them without a legal review.
