@@ -96,6 +96,85 @@ type DatasetSnapshot struct {
 	GrowthBytes int64       `json:"growth_bytes"`
 }
 
+// ServerInfo describes the Postgres instance the run executed against.
+//
+// Without it a result is not comparable to another one: whether the server was
+// PG 14 or 17, had 128 MB or 16 GB of shared_buffers, or was running with
+// synchronous_commit off, moves the numbers far more than most of the pgstorm
+// knobs recorded in RunConfig.
+type ServerInfo struct {
+	Version string `json:"version"`
+	// Settings maps a setting name to its value, with the unit appended where
+	// Postgres reports one ("16384 8kB"). Deliberately a curated subset — see
+	// capturedSettings.
+	Settings map[string]string `json:"settings"`
+}
+
+// capturedSettings is an allow-list rather than everything pg_settings knows:
+// a full dump is several hundred rows and would bury the handful that matter.
+// Each entry here measurably changes what pgstorm reports.
+//
+// Never add anything carrying credentials. PG_DSN holds the password and must
+// not reach a result file, which people share.
+var capturedSettings = []string{
+	"server_version",
+
+	"shared_buffers", "effective_cache_size", "work_mem", "max_connections",
+
+	// full_page_writes matters especially: pgstorm exports FPI counts, and
+	// turning it off changes them fundamentally.
+	"max_wal_size", "min_wal_size", "wal_compression", "full_page_writes",
+
+	"checkpoint_timeout", "checkpoint_completion_target",
+	"synchronous_commit",
+
+	"autovacuum", "autovacuum_naptime", "autovacuum_vacuum_scale_factor",
+
+	// default_toast_compression is the one most specific to this workload:
+	// pgstorm's payloads are built to defeat pglz, so a server using lz4 is
+	// exercising TOAST differently than the design assumes.
+	"default_toast_compression",
+}
+
+// SnapshotServerInfo reads the version and the curated settings from the
+// server under test.
+//
+// Settings named here but absent from the server (they may be
+// version-specific) simply do not come back, which is the intended
+// degradation — no error, just a missing key.
+func SnapshotServerInfo(ctx context.Context, pool DBPool) (ServerInfo, error) {
+	out := ServerInfo{Settings: map[string]string{}}
+	rows, err := pool.Query(ctx, `
+		SELECT name, setting, COALESCE(unit, '')
+		FROM pg_settings
+		WHERE name = ANY($1)
+	`, capturedSettings)
+	if err != nil {
+		return ServerInfo{}, fmt.Errorf("query server settings: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var name, setting, unit string
+		if err := rows.Scan(&name, &setting, &unit); err != nil {
+			return ServerInfo{}, fmt.Errorf("scan server settings: %w", err)
+		}
+		if name == "server_version" {
+			// Surfaced as its own field; no point repeating it in the map.
+			out.Version = setting
+			continue
+		}
+		if unit != "" {
+			setting += " " + unit
+		}
+		out.Settings[name] = setting
+	}
+	if err := rows.Err(); err != nil {
+		return ServerInfo{}, fmt.Errorf("read server settings: %w", err)
+	}
+	return out, nil
+}
+
 // RunResult is the top-level document written at the end of a run.
 type RunResult struct {
 	Profile         string     `json:"profile"`
@@ -109,6 +188,10 @@ type RunResult struct {
 	// Dataset is omitted rather than zeroed when the size could not be read, so
 	// a missing measurement is never mistaken for an empty database.
 	Dataset *DatasetSnapshot `json:"dataset,omitempty"`
+
+	// Server is omitted for the same reason: absent means "not measured", not
+	// "a server with no settings".
+	Server *ServerInfo `json:"server,omitempty"`
 }
 
 // SnapshotDataset reads the current size of the tracked tables.
@@ -151,14 +234,16 @@ func SnapshotDataset(ctx context.Context, pool DBPool, tables []string) (Dataset
 // (a run that ended in the same instant it started, which only happens in
 // tests) yields zero rates rather than an infinity that would not survive a
 // JSON round-trip.
-// dataset may be nil when the size could not be read; the field is then omitted
-// from the document rather than written as zeros.
+// dataset and server may each be nil when the corresponding measurement could
+// not be taken; those fields are then omitted from the document rather than
+// written as zeros.
 func BuildRunResult(
 	totals map[string]opStats,
 	started, ended time.Time,
 	cfg *config.Config,
 	ops []WeightedOp,
 	dataset *DatasetSnapshot,
+	server *ServerInfo,
 ) RunResult {
 	duration := ended.Sub(started).Seconds()
 	rate := func(n int64) float64 {
@@ -221,6 +306,7 @@ func BuildRunResult(
 		Totals:     t,
 		Operations: operations,
 		Dataset:    dataset,
+		Server:     server,
 	}
 }
 
