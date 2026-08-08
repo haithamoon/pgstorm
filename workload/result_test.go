@@ -125,7 +125,7 @@ func TestFinalize_accumulatesAcrossWindows(t *testing.T) {
 
 	ws.Record(OpInsert, 0.040, nil) // trailing, never printed
 
-	totals, _, _ := c.Finalize()
+	totals, _, _, _ := c.Finalize()
 	got := totals[OpInsert]
 	if got.count != 4 {
 		t.Errorf("count: want 4 across two windows plus the trailing one, got %d", got.count)
@@ -144,7 +144,7 @@ func TestFinalize_capturesTrailingWindowWithNoPrint(t *testing.T) {
 	ws.Record(OpDelete, 0.005, nil)
 	ws.Record(OpDelete, 0.015, errors.New("boom"))
 
-	totals, _, _ := c.Finalize()
+	totals, _, _, _ := c.Finalize()
 	got := totals[OpDelete]
 	if got.count != 2 {
 		t.Errorf("count: want 2, got %d", got.count)
@@ -159,8 +159,8 @@ func TestFinalize_isIdempotent(t *testing.T) {
 	ws := c.NewWorkerStats()
 	ws.Record(OpInsert, 0.010, nil)
 
-	first, _, _ := c.Finalize()
-	second, _, _ := c.Finalize()
+	first, _, _, _ := c.Finalize()
+	second, _, _, _ := c.Finalize()
 	if first[OpInsert].count != 1 {
 		t.Fatalf("first Finalize: want 1, got %d", first[OpInsert].count)
 	}
@@ -174,7 +174,7 @@ func TestFinalize_returnsCopyNotLiveTotals(t *testing.T) {
 	ws := c.NewWorkerStats()
 	ws.Record(OpInsert, 0.010, nil)
 
-	totals, _, _ := c.Finalize()
+	totals, _, _, _ := c.Finalize()
 	before := totals[OpInsert].count
 
 	ws.Record(OpInsert, 0.020, nil)
@@ -188,7 +188,7 @@ func TestFinalize_returnsCopyNotLiveTotals(t *testing.T) {
 
 func TestFinalize_timesSpanTheRun(t *testing.T) {
 	c := NewStatsCollector(testOps)
-	_, started, ended := c.Finalize()
+	_, _, started, ended := c.Finalize()
 	if ended.Before(started) {
 		t.Errorf("ended (%v) before started (%v)", ended, started)
 	}
@@ -241,7 +241,7 @@ func TestFinalize_concurrentWithPrint_noLostOrDoubleCountedOps(t *testing.T) {
 	close(stopPrinting)
 	printer.Wait()
 
-	totals, _, _ := c.Finalize()
+	totals, _, _, _ := c.Finalize()
 	want := int64(writers * perWriter)
 	if got := totals[OpInsert].count; got != want {
 		t.Errorf("run total: want %d, got %d (observations lost or double-counted "+
@@ -286,7 +286,7 @@ func TestFinalize_racesPrintWithoutLosingOps(t *testing.T) {
 			captureStdout(t, func() { c.print(time.Now(), time.Second, nil) })
 		}()
 
-		totals, _, _ := c.Finalize()
+		totals, _, _, _ := c.Finalize()
 		wg.Wait()
 
 		// Whichever order they run in, the totals Finalize *returns* — the ones
@@ -776,6 +776,274 @@ func TestRunResult_neverLeaksCredentials(t *testing.T) {
 				t.Errorf("capturedSettings includes %q, which can carry credentials", name)
 			}
 		}
+	}
+}
+
+// ── timeseries ───────────────────────────────────────────────────────────────
+
+// withMinInterval lowers the fold-in threshold so tests can exercise interval
+// boundaries without real second-long sleeps.
+func withMinInterval(t *testing.T, seconds float64) {
+	t.Helper()
+	orig := minIntervalSeconds
+	minIntervalSeconds = seconds
+	t.Cleanup(func() { minIntervalSeconds = orig })
+}
+
+func TestTimeseries_oneEntryPerDrainedWindow(t *testing.T) {
+	withMinInterval(t, 0) // record every window, however brief
+	c := NewStatsCollector(testOps)
+	ws := c.NewWorkerStats()
+
+	ws.Record(OpInsert, 0.010, nil)
+	captureStdout(t, func() { c.print(time.Now(), time.Second, nil) })
+	ws.Record(OpInsert, 0.020, nil)
+	captureStdout(t, func() { c.print(time.Now(), time.Second, nil) })
+	ws.Record(OpInsert, 0.030, nil) // trailing, consumed by Finalize
+
+	_, intervals, _, _ := c.Finalize()
+	if len(intervals) != 3 {
+		t.Fatalf("want 3 intervals (two printed windows plus the trailing one), got %d", len(intervals))
+	}
+	for i, iv := range intervals {
+		if iv.Ops != 1 {
+			t.Errorf("interval %d: want 1 op, got %d", i, iv.Ops)
+		}
+	}
+}
+
+func TestTimeseries_sumsExactlyToTotals(t *testing.T) {
+	// The invariant that matters: both print() and Finalize() drain, and every
+	// drained window must appear in the series exactly once. If these diverge,
+	// observations were lost or double-counted.
+	c := NewStatsCollector(testOps)
+	workers := []*WorkerStats{c.NewWorkerStats(), c.NewWorkerStats()}
+
+	var written int64
+	for round := range 5 {
+		for _, ws := range workers {
+			for i := range 20 {
+				ws.Record(testOps[i%len(testOps)], float64(round+1)*0.001, nil)
+				written++
+			}
+		}
+		captureStdout(t, func() { c.print(time.Now(), time.Second, nil) })
+	}
+	// A final batch with no print, so Finalize's drain has real work.
+	for _, ws := range workers {
+		ws.Record(OpInsert, 0.005, nil)
+		written++
+	}
+
+	totals, intervals, _, _ := c.Finalize()
+
+	var totalOps int64
+	for _, s := range totals {
+		totalOps += s.count
+	}
+	var seriesOps int64
+	for _, iv := range intervals {
+		seriesOps += iv.Ops
+		var perOp int64
+		for _, o := range iv.Operations {
+			perOp += o.Count
+		}
+		if perOp != iv.Ops {
+			t.Errorf("interval per-op counts (%d) do not sum to its own Ops (%d)", perOp, iv.Ops)
+		}
+	}
+	if totalOps != written {
+		t.Errorf("totals: want %d, got %d", written, totalOps)
+	}
+	if seriesOps != written {
+		t.Errorf("timeseries sums to %d, totals to %d — a window was lost or "+
+			"double-counted between print and Finalize", seriesOps, written)
+	}
+}
+
+func TestTimeseries_skipsEmptyWindows(t *testing.T) {
+	// A run ending just after a summary drains nothing; recording that would
+	// append a meaningless zero-length, zero-op entry.
+	c := NewStatsCollector(testOps)
+	ws := c.NewWorkerStats()
+	ws.Record(OpInsert, 0.010, nil)
+
+	captureStdout(t, func() { c.print(time.Now(), time.Second, nil) }) // consumes the op
+	captureStdout(t, func() { c.print(time.Now(), time.Second, nil) }) // nothing left
+	_, intervals, _, _ := c.Finalize()                                 // still nothing
+
+	if len(intervals) != 1 {
+		t.Errorf("want only the one non-empty window, got %d intervals", len(intervals))
+	}
+}
+
+func TestTimeseries_boundariesAreContiguousAndIncreasing(t *testing.T) {
+	withMinInterval(t, 0) // keep each brief window as its own entry
+	c := NewStatsCollector(testOps)
+	ws := c.NewWorkerStats()
+	for range 3 {
+		ws.Record(OpInsert, 0.001, nil)
+		time.Sleep(2 * time.Millisecond) // ensure measurable, distinct spans
+		captureStdout(t, func() { c.print(time.Now(), time.Second, nil) })
+	}
+
+	_, intervals, _, _ := c.Finalize()
+	if len(intervals) < 2 {
+		t.Fatalf("need at least 2 intervals, got %d", len(intervals))
+	}
+	if intervals[0].StartSeconds < 0 {
+		t.Errorf("first interval should start at or after the run start, got %v",
+			intervals[0].StartSeconds)
+	}
+	for i, iv := range intervals {
+		if iv.EndSeconds <= iv.StartSeconds {
+			t.Errorf("interval %d does not advance: %v -> %v", i, iv.StartSeconds, iv.EndSeconds)
+		}
+		if i > 0 && iv.StartSeconds != intervals[i-1].EndSeconds {
+			t.Errorf("gap between interval %d and %d: %v then %v — windows must be "+
+				"contiguous or the series misrepresents the run",
+				i-1, i, intervals[i-1].EndSeconds, iv.StartSeconds)
+		}
+		// Rate must come from the measured span, not the configured interval.
+		if iv.Ops > 0 {
+			want := float64(iv.Ops) / (iv.EndSeconds - iv.StartSeconds)
+			if !approxEq(iv.OpsPerSec, want) {
+				t.Errorf("interval %d rate: want %v, got %v", i, want, iv.OpsPerSec)
+			}
+		}
+	}
+}
+
+func TestTimeseries_trailingSliverFoldsIntoPreviousInterval(t *testing.T) {
+	// Finalize drains microseconds after the last print. Ops landing in that gap
+	// must not become an interval of their own: dividing them by a near-zero span
+	// invents a throughput spike. Observed live before this was handled — 4 ops
+	// over ~1 ms reported as 2971 ops/sec.
+	withMinInterval(t, 0.05)
+	c := NewStatsCollector(testOps)
+	ws := c.NewWorkerStats()
+
+	for range 100 {
+		ws.Record(OpInsert, 0.001, nil)
+	}
+	time.Sleep(60 * time.Millisecond) // exceed minIntervalSeconds so this is a real window
+	captureStdout(t, func() { c.print(time.Now(), time.Second, nil) })
+
+	// The sliver: a few ops, then an immediate Finalize.
+	for range 4 {
+		ws.Record(OpInsert, 0.001, nil)
+	}
+	_, intervals, _, _ := c.Finalize()
+
+	if len(intervals) != 1 {
+		t.Fatalf("the sliver should have merged, want 1 interval, got %d", len(intervals))
+	}
+	iv := intervals[0]
+	if iv.Ops != 104 {
+		t.Errorf("merged interval should hold every op: want 104, got %d", iv.Ops)
+	}
+	// The real check: a plausible rate. 104 ops over ~1.1s is ~95/sec; the bug
+	// produced thousands.
+	span := iv.EndSeconds - iv.StartSeconds
+	if span < minIntervalSeconds {
+		t.Errorf("merged interval span collapsed: %v", span)
+	}
+	if iv.OpsPerSec > 100000 {
+		t.Errorf("implausible rate %v ops/sec over %vs — the sliver was divided by "+
+			"a near-zero span instead of being merged", iv.OpsPerSec, span)
+	}
+	if !approxEq(iv.OpsPerSec, float64(iv.Ops)/span) {
+		t.Errorf("rate not recomputed after merge: %v vs %v", iv.OpsPerSec, float64(iv.Ops)/span)
+	}
+	var perOp int64
+	for _, o := range iv.Operations {
+		perOp += o.Count
+	}
+	if perOp != iv.Ops {
+		t.Errorf("per-op counts (%d) lost the merged ops (interval has %d)", perOp, iv.Ops)
+	}
+}
+
+func TestTimeseries_noIntervalReportsAnImplausibleRate(t *testing.T) {
+	// Guards the whole series, not just the trailing entry: any window short
+	// enough to distort its rate should have been folded rather than emitted.
+	withMinInterval(t, 0.05)
+	c := NewStatsCollector(testOps)
+	ws := c.NewWorkerStats()
+
+	for round := range 4 {
+		for range 10 {
+			ws.Record(OpInsert, 0.001, nil)
+		}
+		// Alternate real windows with immediate back-to-back drains.
+		if round%2 == 0 {
+			time.Sleep(60 * time.Millisecond)
+		}
+		captureStdout(t, func() { c.print(time.Now(), time.Second, nil) })
+	}
+	_, intervals, _, _ := c.Finalize()
+
+	for i, iv := range intervals {
+		span := iv.EndSeconds - iv.StartSeconds
+		if span < minIntervalSeconds {
+			t.Errorf("interval %d spans only %vs — shorter than minIntervalSeconds, "+
+				"so it should have been folded into its predecessor", i, span)
+		}
+	}
+}
+
+func TestTimeseries_finalizeReturnsACopy(t *testing.T) {
+	c := NewStatsCollector(testOps)
+	ws := c.NewWorkerStats()
+	ws.Record(OpInsert, 0.010, nil)
+
+	_, first, _, _ := c.Finalize()
+	n := len(first)
+
+	ws.Record(OpInsert, 0.020, nil)
+	c.Finalize()
+
+	if len(first) != n {
+		t.Errorf("a previously returned series was mutated: had %d, now %d", n, len(first))
+	}
+}
+
+func TestBuildRunResult_timeseriesRoundTrips(t *testing.T) {
+	series := []IntervalStats{{
+		StartSeconds: 0, EndSeconds: 30, Ops: 100, Errors: 1, OpsPerSec: 3.3,
+		Operations: []IntervalOp{{Op: OpInsert, Count: 60, OpsPerSec: 2, P99MS: 12.5}},
+	}}
+	r := BuildRunResult(map[string]opStats{}, time.Now(), time.Now().Add(time.Second),
+		testCfg(), testWeights, RunMeta{Timeseries: series})
+
+	raw, err := json.Marshal(r)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var got RunResult
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(got.Timeseries) != 1 {
+		t.Fatalf("timeseries lost in round-trip: %+v", got.Timeseries)
+	}
+	if got.Timeseries[0].Ops != 100 || got.Timeseries[0].EndSeconds != 30 {
+		t.Errorf("interval fields lost: %+v", got.Timeseries[0])
+	}
+	if len(got.Timeseries[0].Operations) != 1 || got.Timeseries[0].Operations[0].P99MS != 12.5 {
+		t.Errorf("per-op detail lost: %+v", got.Timeseries[0].Operations)
+	}
+}
+
+func TestBuildRunResult_timeseriesOmittedWhenEmpty(t *testing.T) {
+	r := BuildRunResult(map[string]opStats{}, time.Now(), time.Now().Add(time.Second),
+		testCfg(), testWeights, RunMeta{})
+	raw, err := json.Marshal(r)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(raw), "timeseries") {
+		t.Errorf("timeseries should be omitted when there are no intervals, got: %s", raw)
 	}
 }
 
