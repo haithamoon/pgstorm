@@ -105,6 +105,14 @@ type StatsCollector struct {
 	// drives the console summary is destructive, so without this nothing but
 	// scrollback outlives the process.
 	total map[string]*opStats
+
+	// intervals is one entry per drained window, in order, so a result can show
+	// when during the run something changed rather than only the average.
+	// Bounded by run length: roughly 700 bytes per SUMMARY_INTERVAL_SECS.
+	intervals []IntervalStats
+	// lastBoundary is where the previous interval ended, so each one is measured
+	// over its true span rather than the configured interval.
+	lastBoundary time.Time
 }
 
 func NewStatsCollector(ops []string) *StatsCollector {
@@ -112,7 +120,8 @@ func NewStatsCollector(ops []string) *StatsCollector {
 	for _, op := range ops {
 		total[op] = &opStats{}
 	}
-	return &StatsCollector{start: time.Now(), ops: ops, total: total}
+	now := time.Now()
+	return &StatsCollector{start: now, lastBoundary: now, ops: ops, total: total}
 }
 
 // NewWorkerStats creates a WorkerStats registered with the collector.
@@ -154,7 +163,7 @@ func mergeInto(dst, src *opStats) {
 // drain snapshots every worker and merges the result into one map, additionally
 // folding it into the never-reset run total. This is the only place worker
 // windows are consumed, so every observation lands in the total exactly once.
-func (c *StatsCollector) drain() map[string]*opStats {
+func (c *StatsCollector) drain(now time.Time) map[string]*opStats {
 	// Lifting the windows out of the workers and folding them into the total
 	// must be one atomic step. Releasing the lock in between allows a concurrent
 	// drain (the summary goroutine's last print racing main's Finalize, both
@@ -182,15 +191,105 @@ func (c *StatsCollector) drain() map[string]*opStats {
 			mergeInto(t, m)
 		}
 	}
+	c.recordIntervalLocked(now, merged)
 	return merged
+}
+
+// minIntervalSeconds is the shortest span that gets its own entry in the
+// series. Anything briefer is a drain-timing artifact rather than a real
+// observation window.
+//
+// A var rather than a const only so tests can lower it and exercise the folding
+// logic without real second-long sleeps. Not configurable at runtime.
+var minIntervalSeconds = 1.0
+
+// recordIntervalLocked appends this window to the series. Called from drain so
+// that the trailing window Finalize consumes is captured too — otherwise the
+// series would not sum to the totals.
+//
+// Caller must hold c.mu.
+func (c *StatsCollector) recordIntervalLocked(now time.Time, merged map[string]*opStats) {
+	var ops, errs int64
+	for _, s := range merged {
+		ops += s.count
+		errs += s.errors
+	}
+	// A run ending just after a summary drains an empty window; recording it
+	// would append a zero-length, zero-op entry that means nothing.
+	if ops == 0 {
+		return
+	}
+
+	startSecs := c.lastBoundary.Sub(c.start).Seconds()
+	endSecs := now.Sub(c.start).Seconds()
+	span := endSecs - startSecs
+
+	// Finalize drains microseconds after the summary loop's last print, so the
+	// few ops that landed in between would otherwise become an interval of
+	// near-zero length — and dividing by it invents a throughput spike that
+	// never happened (observed live: 4 ops over ~1 ms reported as 2971 ops/sec).
+	// Fold such a sliver into the preceding interval instead of dropping it,
+	// which keeps the series summing exactly to the totals. Percentiles are left
+	// as they were: the sliver is a rounding error against the window it joins.
+	if span < minIntervalSeconds && len(c.intervals) > 0 {
+		prev := &c.intervals[len(c.intervals)-1]
+		prev.Ops += ops
+		prev.Errors += errs
+		prev.EndSeconds = endSecs
+		if prevSpan := prev.EndSeconds - prev.StartSeconds; prevSpan > 0 {
+			prev.OpsPerSec = float64(prev.Ops) / prevSpan
+			for i := range prev.Operations {
+				if s, ok := merged[prev.Operations[i].Op]; ok {
+					prev.Operations[i].Count += s.count
+				}
+				prev.Operations[i].OpsPerSec = float64(prev.Operations[i].Count) / prevSpan
+			}
+		}
+		c.lastBoundary = now
+		return
+	}
+	rate := func(n int64) float64 {
+		if span <= 0 {
+			return 0
+		}
+		return float64(n) / span
+	}
+
+	// Same order as c.ops so consecutive intervals line up when diffed.
+	operations := make([]IntervalOp, 0, len(c.ops))
+	for _, op := range c.ops {
+		s, ok := merged[op]
+		if !ok || s.count == 0 {
+			continue
+		}
+		keys, total := s.sortedKeys()
+		operations = append(operations, IntervalOp{
+			Op:        op,
+			Count:     s.count,
+			OpsPerSec: rate(s.count),
+			P50MS:     quantileFrom(s.latencies, keys, total, 0.50),
+			P95MS:     quantileFrom(s.latencies, keys, total, 0.95),
+			P99MS:     quantileFrom(s.latencies, keys, total, 0.99),
+		})
+	}
+
+	c.intervals = append(c.intervals, IntervalStats{
+		StartSeconds: startSecs,
+		EndSeconds:   endSecs,
+		Ops:          ops,
+		Errors:       errs,
+		OpsPerSec:    rate(ops),
+		Operations:   operations,
+	})
+	c.lastBoundary = now
 }
 
 // Finalize consumes any window that has accumulated since the last summary and
 // returns the whole-run totals. Call it after all workers have stopped and the
 // summary loop has exited; calling it twice is safe but the second call adds
 // nothing.
-func (c *StatsCollector) Finalize() (totals map[string]opStats, started, ended time.Time) {
-	c.drain() // fold the trailing partial window into the total
+func (c *StatsCollector) Finalize() (totals map[string]opStats, intervals []IntervalStats, started, ended time.Time) {
+	c.drain(time.Now()) // fold the trailing partial window into the total and series
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -198,7 +297,9 @@ func (c *StatsCollector) Finalize() (totals map[string]opStats, started, ended t
 	for op, s := range c.total {
 		out[op] = *s
 	}
-	return out, c.start, time.Now()
+	// Copied so a later drain cannot mutate a series the caller is writing out.
+	series := slices.Clone(c.intervals)
+	return out, series, c.start, time.Now()
 }
 
 // latencyStats derives the full latency summary in a single sort. Every value
@@ -225,7 +326,7 @@ func (s *opStats) latencyStats() LatencyStats {
 }
 
 func (c *StatsCollector) print(now time.Time, window time.Duration, pool *pgxpool.Pool) {
-	merged := c.drain()
+	merged := c.drain(now)
 
 	c.mu.Lock()
 	workerCount := len(c.workers)

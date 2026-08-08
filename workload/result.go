@@ -45,6 +45,37 @@ type OpResult struct {
 	Latency   LatencyStats `json:"latency"`
 }
 
+// IntervalOp is one operation's activity within a single summary window.
+//
+// Deliberately slimmer than OpResult: count, rate and the three percentiles the
+// console prints. Min, mean, p999 and max are whole-run questions, and carrying
+// them per window would multiply the size of a long run's series for little
+// added insight.
+type IntervalOp struct {
+	Op        string  `json:"op"`
+	Count     int64   `json:"count"`
+	OpsPerSec float64 `json:"ops_per_sec"`
+	P50MS     float64 `json:"p50_ms"`
+	P95MS     float64 `json:"p95_ms"`
+	P99MS     float64 `json:"p99_ms"`
+}
+
+// IntervalStats is one summary window, letting a reader see *when* during a run
+// something changed — throughput sagging as the dataset grows, or latency
+// stepping up when autovacuum starts work — without standing up Prometheus.
+//
+// Boundaries are seconds elapsed since the run started. Rates use the actual
+// measured span rather than the configured interval, since the final window is
+// shorter than the rest and ticker delivery drifts.
+type IntervalStats struct {
+	StartSeconds float64      `json:"start_seconds"`
+	EndSeconds   float64      `json:"end_seconds"`
+	Ops          int64        `json:"ops"`
+	Errors       int64        `json:"errors"`
+	OpsPerSec    float64      `json:"ops_per_sec"`
+	Operations   []IntervalOp `json:"operations"`
+}
+
 // RunTotals aggregates across every operation.
 type RunTotals struct {
 	Ops       int64   `json:"ops"`
@@ -195,6 +226,8 @@ type RunMeta struct {
 	Dataset   *DatasetSnapshot
 	Server    *ServerInfo
 	StoppedBy string
+	// Timeseries comes from StatsCollector.Finalize.
+	Timeseries []IntervalStats
 }
 
 // RunResult is the top-level document written at the end of a run.
@@ -207,6 +240,11 @@ type RunResult struct {
 	Config          RunConfig  `json:"config"`
 	Totals          RunTotals  `json:"totals"`
 	Operations      []OpResult `json:"operations"`
+
+	// Timeseries is every summary window in order. Its op counts sum exactly to
+	// Totals.Ops — the same drain path feeds both, so a mismatch would mean
+	// observations were lost or double-counted.
+	Timeseries []IntervalStats `json:"timeseries,omitempty"`
 
 	// Dataset is omitted rather than zeroed when the size could not be read, so
 	// a missing measurement is never mistaken for an empty database.
@@ -325,6 +363,7 @@ func BuildRunResult(
 			OpWeights:       weights,
 		},
 		StoppedBy:  meta.StoppedBy,
+		Timeseries: meta.Timeseries,
 		Totals:     t,
 		Operations: operations,
 		Dataset:    meta.Dataset,

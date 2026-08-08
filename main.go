@@ -198,7 +198,7 @@ func main() {
 	// recorded. A failure here must not change the exit path — the run itself
 	// already happened, and the console summaries were printed.
 	if cfg.ResultJSONPath != "" {
-		totals, started, ended := collector.Finalize()
+		totals, intervals, started, ended := collector.Finalize()
 
 		// ctx was cancelled to stop the workers, so the closing measurement needs
 		// its own short-lived context or the query would fail immediately.
@@ -219,9 +219,10 @@ func main() {
 		}
 
 		result := workload.BuildRunResult(totals, started, ended, cfg, ops, workload.RunMeta{
-			Dataset:   dataset,
-			Server:    server,
-			StoppedBy: stoppedBy,
+			Dataset:    dataset,
+			Server:     server,
+			StoppedBy:  stoppedBy,
+			Timeseries: intervals,
 		})
 		if err := workload.WriteRunResult(cfg.ResultJSONPath, result); err != nil {
 			log.Printf("write result json: %v", err)

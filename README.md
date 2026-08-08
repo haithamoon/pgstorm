@@ -345,6 +345,18 @@ A curated set of about fifteen settings, not everything `pg_settings` knows — 
 
 **Credentials are never written.** `PG_DSN` contains the database password and is deliberately excluded from the document, along with any setting that could carry a connection string. A test enforces this so it cannot regress.
 
+Finally, every summary window is kept as a series, so you can see *when* during a run something changed rather than only the average:
+
+```json
+"timeseries": [
+  { "start_seconds": 0,  "end_seconds": 10, "ops": 407, "ops_per_sec": 40.7,
+    "operations": [ { "op": "read_join", "count": 81, "ops_per_sec": 8.1, "p50_ms": 92.4, "p95_ms": 310.6, "p99_ms": 541.5 } ] },
+  { "start_seconds": 10, "end_seconds": 20, "ops": 466, "ops_per_sec": 46.6, "operations": [ ... ] }
+]
+```
+
+This is where throughput sagging as the dataset grows, or latency stepping up when autovacuum starts work, becomes visible without standing up Prometheus. Each entry carries count, rate and p50/p95/p99 per operation — the same figures the console prints. The interval op counts sum exactly to `totals`.
+
 Notes:
 
 - **Opt-in.** Leave `RESULT_JSON_PATH` empty (the default) and nothing is written.
