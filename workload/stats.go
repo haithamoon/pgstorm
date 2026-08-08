@@ -273,42 +273,55 @@ func (c *StatsCollector) recordIntervalLocked(now time.Time, merged map[string]*
 		prev.Ops += ops
 		prev.Errors += errs
 		prev.EndSeconds = endSecs
-		if prevSpan := prev.EndSeconds - prev.StartSeconds; prevSpan > 0 {
-			prev.OpsPerSec = float64(prev.Ops) / prevSpan
+		prevSpan := prev.EndSeconds - prev.StartSeconds
 
-			// Fold into the entries the predecessor already has...
-			folded := make(map[string]bool, len(prev.Operations))
-			for i := range prev.Operations {
-				op := prev.Operations[i].Op
-				if s, ok := merged[op]; ok {
-					prev.Operations[i].Count += s.count
-					prev.Operations[i].Errors += s.errors
-					folded[op] = true
-				}
-				prev.Operations[i].OpsPerSec = float64(prev.Operations[i].Count) / prevSpan
+		// Rebuilt in c.ops order rather than folded in place, so a merged interval
+		// keeps the same op ordering as its neighbours and two consecutive entries
+		// still line up when diffed. Appending the newcomers would have ordered a
+		// folded interval differently from every other one.
+		//
+		// An op idle during the predecessor window has no entry to fold into. Its
+		// ops still landed in prev.Ops above, so without carrying it over the per-op
+		// counts would stop summing to the interval total. Percentiles for such an
+		// op come from the sliver alone — the only measurement that exists for it.
+		//
+		// Counts are merged unconditionally; only the rate needs a non-zero span.
+		// Keeping the merge inside a span guard would reintroduce the same
+		// divergence it is here to prevent, on the degenerate window.
+		existing := make(map[string]IntervalOp, len(prev.Operations))
+		for _, o := range prev.Operations {
+			existing[o.Op] = o
+		}
+		rebuilt := make([]IntervalOp, 0, len(prev.Operations)+len(c.ops))
+		for _, op := range c.ops {
+			o, had := existing[op]
+			s, active := merged[op]
+			active = active && s.count > 0
+			if !had && !active {
+				continue
 			}
-
-			// ...and append the rest. An op idle during the predecessor window has
-			// no entry to fold into, so without this its ops would land in prev.Ops
-			// and appear against no operation — the per-op counts would stop summing
-			// to the interval total. Percentiles come from the sliver alone, which is
-			// the only measurement there is for an op that did nothing beforehand.
-			for _, op := range c.ops {
-				s, ok := merged[op]
-				if !ok || s.count == 0 || folded[op] {
-					continue
-				}
+			if !had {
 				keys, total := s.sortedKeys()
-				prev.Operations = append(prev.Operations, IntervalOp{
-					Op:        op,
-					Count:     s.count,
-					Errors:    s.errors,
-					OpsPerSec: float64(s.count) / prevSpan,
-					P50MS:     quantileFrom(s.latencies, keys, total, 0.50),
-					P95MS:     quantileFrom(s.latencies, keys, total, 0.95),
-					P99MS:     quantileFrom(s.latencies, keys, total, 0.99),
-				})
+				o = IntervalOp{
+					Op:    op,
+					P50MS: quantileFrom(s.latencies, keys, total, 0.50),
+					P95MS: quantileFrom(s.latencies, keys, total, 0.95),
+					P99MS: quantileFrom(s.latencies, keys, total, 0.99),
+				}
 			}
+			if active {
+				o.Count += s.count
+				o.Errors += s.errors
+			}
+			if prevSpan > 0 {
+				o.OpsPerSec = float64(o.Count) / prevSpan
+			}
+			rebuilt = append(rebuilt, o)
+		}
+		prev.Operations = rebuilt
+
+		if prevSpan > 0 {
+			prev.OpsPerSec = float64(prev.Ops) / prevSpan
 		}
 		c.lastBoundary = now
 		return
@@ -439,6 +452,11 @@ func (c *StatsCollector) print(now time.Time, window time.Duration, pool *pgxpoo
 // interpolation, and no ceiling to clamp against.
 //
 // Returns 0 for an empty window.
+func percentile(s *opStats, q float64) float64 {
+	keys, total := s.sortedKeys()
+	return quantileFrom(s.latencies, keys, total, q)
+}
+
 // latencyCell renders one percentile for the console table, or "—" when the op
 // has no successful observations to summarise. Printing 0.0 there would read as
 // "instant" for what is in fact an op that failed every time — the same
@@ -450,11 +468,6 @@ func latencyCell(s *opStats, q float64) string {
 		return "—"
 	}
 	return fmt.Sprintf("%.1f", percentile(s, q))
-}
-
-func percentile(s *opStats, q float64) float64 {
-	keys, total := s.sortedKeys()
-	return quantileFrom(s.latencies, keys, total, q)
 }
 
 // sortedKeys returns the distinct latencies in ascending order plus the total

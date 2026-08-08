@@ -950,16 +950,22 @@ func TestTimeseries_perOpErrorsSumToIntervalErrors(t *testing.T) {
 	c := NewStatsCollector(testOps)
 	ws := c.NewWorkerStats()
 
-	// Window 1: insert only, and it half-fails. read_join is deliberately absent
-	// so the fold below has to append it rather than find it.
-	ws.Record(OpInsert, 0.010, nil)
-	ws.Record(OpInsert, 0.001, errBoom)
+	// Window 1: read_join only, and it half-fails. insert is deliberately absent
+	// so the fold below has to carry it over rather than find an entry for it.
+	//
+	// insert is chosen as the newcomer on purpose: it is declared *before*
+	// read_join in testOps, so a fold that appends newcomers rather than
+	// rebuilding in declared order emits them backwards and the ordering
+	// assertion at the end catches it. With the roles reversed the append
+	// happens to land in order and proves nothing.
+	ws.Record(OpReadJoin, 0.010, nil)
+	ws.Record(OpReadJoin, 0.001, errBoom)
 	captureStdout(t, func() { c.print(time.Now(), time.Second, nil) })
 
 	// Trailing sliver: an op the predecessor never saw, plus more of one it did.
-	ws.Record(OpReadJoin, 0.030, nil)
-	ws.Record(OpReadJoin, 0.001, errBoom)
-	ws.Record(OpInsert, 0.020, errBoom)
+	ws.Record(OpInsert, 0.030, nil)
+	ws.Record(OpInsert, 0.001, errBoom)
+	ws.Record(OpReadJoin, 0.020, errBoom)
 
 	totals, intervals, _, _ := c.Finalize()
 
@@ -994,22 +1000,52 @@ func TestTimeseries_perOpErrorsSumToIntervalErrors(t *testing.T) {
 			wantOps, wantErrs, intervals[0].Ops, intervals[0].Errors)
 	}
 
-	// read_join existed only in the folded sliver, so its presence is the proof
-	// the append path ran.
-	var sawReadJoin bool
+	// insert existed only in the folded sliver, so its presence is the proof the
+	// carry-over path ran.
+	var sawInsert bool
 	for _, o := range intervals[0].Operations {
-		if o.Op == OpReadJoin {
-			sawReadJoin = true
+		if o.Op == OpInsert {
+			sawInsert = true
 			if o.Count != 2 || o.Errors != 1 {
-				t.Errorf("read_join: want count=2 errors=1, got count=%d errors=%d", o.Count, o.Errors)
+				t.Errorf("insert: want count=2 errors=1, got count=%d errors=%d", o.Count, o.Errors)
 			}
 			if !approxEq(o.P99MS, 30) {
-				t.Errorf("read_join p99 should come from its one success: want 30, got %v", o.P99MS)
+				t.Errorf("insert p99 should come from its one success: want 30, got %v", o.P99MS)
 			}
 		}
 	}
-	if !sawReadJoin {
-		t.Error("read_join appeared only in the folded sliver and was lost entirely")
+	if !sawInsert {
+		t.Error("insert appeared only in the folded sliver and was lost entirely")
+	}
+
+	// Ops are emitted in c.ops order so consecutive intervals line up when
+	// diffed; a fold must not reorder them.
+	assertOpsInDeclaredOrder(t, intervals[0].Operations)
+}
+
+// assertOpsInDeclaredOrder checks an interval's operations follow testOps order.
+func assertOpsInDeclaredOrder(t *testing.T, ops []IntervalOp) {
+	t.Helper()
+	pos := make(map[string]int, len(testOps))
+	for i, op := range testOps {
+		pos[op] = i
+	}
+	last := -1
+	for _, o := range ops {
+		i, ok := pos[o.Op]
+		if !ok {
+			t.Errorf("unknown op %q in interval", o.Op)
+			continue
+		}
+		if i < last {
+			var got []string
+			for _, x := range ops {
+				got = append(got, x.Op)
+			}
+			t.Errorf("interval ops out of declared order: %v (want the order of %v)", got, testOps)
+			return
+		}
+		last = i
 	}
 }
 
