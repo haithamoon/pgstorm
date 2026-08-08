@@ -940,6 +940,113 @@ func TestTimeseries_sumsExactlyToTotals(t *testing.T) {
 	}
 }
 
+// TestTimeseries_perOpErrorsSumToIntervalErrors is deliberately multi-op and
+// deliberately includes a sliver fold. Both existing sum-invariant tests use a
+// single op, so neither can catch the fold path dropping an operation: the fold
+// iterates the *predecessor's* entries, so an op idle during that window has its
+// ops added to the interval total while appearing against no operation at all.
+func TestTimeseries_perOpErrorsSumToIntervalErrors(t *testing.T) {
+	withMinInterval(t, 5) // make the final trailing window fold, not stand alone
+	c := NewStatsCollector(testOps)
+	ws := c.NewWorkerStats()
+
+	// Window 1: insert only, and it half-fails. read_join is deliberately absent
+	// so the fold below has to append it rather than find it.
+	ws.Record(OpInsert, 0.010, nil)
+	ws.Record(OpInsert, 0.001, errBoom)
+	captureStdout(t, func() { c.print(time.Now(), time.Second, nil) })
+
+	// Trailing sliver: an op the predecessor never saw, plus more of one it did.
+	ws.Record(OpReadJoin, 0.030, nil)
+	ws.Record(OpReadJoin, 0.001, errBoom)
+	ws.Record(OpInsert, 0.020, errBoom)
+
+	totals, intervals, _, _ := c.Finalize()
+
+	if len(intervals) != 1 {
+		t.Fatalf("the sliver should have folded into the single interval, got %d", len(intervals))
+	}
+
+	var wantOps, wantErrs int64
+	for _, s := range totals {
+		wantOps += s.count
+		wantErrs += s.errors
+	}
+
+	for _, iv := range intervals {
+		var perOpCount, perOpErrs int64
+		for _, o := range iv.Operations {
+			perOpCount += o.Count
+			perOpErrs += o.Errors
+		}
+		if perOpCount != iv.Ops {
+			t.Errorf("per-op counts (%d) do not sum to the interval's Ops (%d) — "+
+				"an op was dropped by the fold", perOpCount, iv.Ops)
+		}
+		if perOpErrs != iv.Errors {
+			t.Errorf("per-op errors (%d) do not sum to the interval's Errors (%d)",
+				perOpErrs, iv.Errors)
+		}
+	}
+
+	if intervals[0].Ops != wantOps || intervals[0].Errors != wantErrs {
+		t.Errorf("interval totals: want ops=%d errors=%d, got ops=%d errors=%d",
+			wantOps, wantErrs, intervals[0].Ops, intervals[0].Errors)
+	}
+
+	// read_join existed only in the folded sliver, so its presence is the proof
+	// the append path ran.
+	var sawReadJoin bool
+	for _, o := range intervals[0].Operations {
+		if o.Op == OpReadJoin {
+			sawReadJoin = true
+			if o.Count != 2 || o.Errors != 1 {
+				t.Errorf("read_join: want count=2 errors=1, got count=%d errors=%d", o.Count, o.Errors)
+			}
+			if !approxEq(o.P99MS, 30) {
+				t.Errorf("read_join p99 should come from its one success: want 30, got %v", o.P99MS)
+			}
+		}
+	}
+	if !sawReadJoin {
+		t.Error("read_join appeared only in the folded sliver and was lost entirely")
+	}
+}
+
+// TestTimeseries_zeroSpanWindowReportsNoRate covers the degenerate window that
+// the sliver fold normally absorbs. With folding disabled a window can be
+// recorded with a span of exactly zero, and the rate must come back as 0 rather
+// than dividing by it. Pre-existing gap, covered here because a NaN or +Inf
+// ops_per_sec would poison a result document.
+func TestTimeseries_zeroSpanWindowReportsNoRate(t *testing.T) {
+	withMinInterval(t, 0) // never fold, so a zero-length window is recorded as-is
+	c := NewStatsCollector(testOps)
+	ws := c.NewWorkerStats()
+
+	at := time.Now()
+	ws.Record(OpInsert, 0.010, nil)
+	captureStdout(t, func() { c.print(at, time.Second, nil) })
+	ws.Record(OpInsert, 0.010, nil)
+	captureStdout(t, func() { c.print(at, time.Second, nil) }) // same instant → span 0
+
+	_, intervals, _, _ := c.Finalize()
+	if len(intervals) < 2 {
+		t.Fatalf("want at least 2 intervals, got %d", len(intervals))
+	}
+	zero := intervals[1]
+	if zero.EndSeconds != zero.StartSeconds {
+		t.Fatalf("expected a zero-span interval, got %.6f-%.6f", zero.StartSeconds, zero.EndSeconds)
+	}
+	if zero.OpsPerSec != 0 {
+		t.Errorf("zero-span interval rate: want 0, got %v", zero.OpsPerSec)
+	}
+	for _, o := range zero.Operations {
+		if o.OpsPerSec != 0 {
+			t.Errorf("op %s rate in a zero-span window: want 0, got %v", o.Op, o.OpsPerSec)
+		}
+	}
+}
+
 func TestTimeseries_skipsEmptyWindows(t *testing.T) {
 	// A run ending just after a summary drains nothing; recording that would
 	// append a meaningless zero-length, zero-op entry.

@@ -57,13 +57,21 @@ type OpResult struct {
 
 // IntervalOp is one operation's activity within a single summary window.
 //
-// Deliberately slimmer than OpResult: count, rate and the three percentiles the
-// console prints. Min, mean, p999 and max are whole-run questions, and carrying
-// them per window would multiply the size of a long run's series for little
-// added insight.
+// Deliberately slimmer than OpResult: count, errors, rate and the three
+// percentiles the console prints. Min, mean, p999 and max are whole-run
+// questions, and carrying them per window would multiply the size of a long
+// run's series for little added insight.
+//
+// Errors is omitempty purely for size — this is the high-cardinality struct and
+// most windows are clean, so a 24h series would otherwise carry thousands of
+// "errors": 0. Absent means zero here, which is the *opposite* of what an
+// absent latency block means on OpResult; the two are different questions.
+// Without this field a window's percentiles could be zero because everything
+// failed, with nothing alongside to say so.
 type IntervalOp struct {
 	Op        string  `json:"op"`
 	Count     int64   `json:"count"`
+	Errors    int64   `json:"errors,omitempty"`
 	OpsPerSec float64 `json:"ops_per_sec"`
 	P50MS     float64 `json:"p50_ms"`
 	P95MS     float64 `json:"p95_ms"`

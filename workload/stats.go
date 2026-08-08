@@ -275,11 +275,39 @@ func (c *StatsCollector) recordIntervalLocked(now time.Time, merged map[string]*
 		prev.EndSeconds = endSecs
 		if prevSpan := prev.EndSeconds - prev.StartSeconds; prevSpan > 0 {
 			prev.OpsPerSec = float64(prev.Ops) / prevSpan
+
+			// Fold into the entries the predecessor already has...
+			folded := make(map[string]bool, len(prev.Operations))
 			for i := range prev.Operations {
-				if s, ok := merged[prev.Operations[i].Op]; ok {
+				op := prev.Operations[i].Op
+				if s, ok := merged[op]; ok {
 					prev.Operations[i].Count += s.count
+					prev.Operations[i].Errors += s.errors
+					folded[op] = true
 				}
 				prev.Operations[i].OpsPerSec = float64(prev.Operations[i].Count) / prevSpan
+			}
+
+			// ...and append the rest. An op idle during the predecessor window has
+			// no entry to fold into, so without this its ops would land in prev.Ops
+			// and appear against no operation — the per-op counts would stop summing
+			// to the interval total. Percentiles come from the sliver alone, which is
+			// the only measurement there is for an op that did nothing beforehand.
+			for _, op := range c.ops {
+				s, ok := merged[op]
+				if !ok || s.count == 0 || folded[op] {
+					continue
+				}
+				keys, total := s.sortedKeys()
+				prev.Operations = append(prev.Operations, IntervalOp{
+					Op:        op,
+					Count:     s.count,
+					Errors:    s.errors,
+					OpsPerSec: float64(s.count) / prevSpan,
+					P50MS:     quantileFrom(s.latencies, keys, total, 0.50),
+					P95MS:     quantileFrom(s.latencies, keys, total, 0.95),
+					P99MS:     quantileFrom(s.latencies, keys, total, 0.99),
+				})
 			}
 		}
 		c.lastBoundary = now
@@ -303,6 +331,7 @@ func (c *StatsCollector) recordIntervalLocked(now time.Time, merged map[string]*
 		operations = append(operations, IntervalOp{
 			Op:        op,
 			Count:     s.count,
+			Errors:    s.errors,
 			OpsPerSec: rate(s.count),
 			P50MS:     quantileFrom(s.latencies, keys, total, 0.50),
 			P95MS:     quantileFrom(s.latencies, keys, total, 0.95),
