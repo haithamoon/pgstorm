@@ -535,6 +535,85 @@ func TestSnapshotDataset_errorPaths(t *testing.T) {
 	}
 }
 
+// TestBuildRunResult_latencyPresentIffAnOpSucceeded pins the equivalence stated
+// on OpResult: the latency block is present iff count > errors. An op that
+// failed every time has nothing to summarise, and emitting an all-zero block
+// would read as "instant" — the same misreading this whole change removes.
+func TestBuildRunResult_latencyPresentIffAnOpSucceeded(t *testing.T) {
+	// opJSON returns the marshalled object for one op, so key presence can be
+	// checked per op. strings.Contains would be useless here: any other op in
+	// the document supplies the "latency" key.
+	opJSON := func(t *testing.T, r RunResult, op string) map[string]any {
+		t.Helper()
+		raw, err := json.Marshal(r)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		var doc struct {
+			Operations []map[string]any `json:"operations"`
+		}
+		if err := json.Unmarshal(raw, &doc); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		for _, o := range doc.Operations {
+			if o["op"] == op {
+				return o
+			}
+		}
+		t.Fatalf("op %q not in document: %s", op, raw)
+		return nil
+	}
+
+	t.Run("every attempt failed", func(t *testing.T) {
+		totals := map[string]opStats{OpDelete: {count: 5, errors: 5}}
+		r := BuildRunResult(totals, time.Now(), time.Now().Add(time.Second),
+			testCfg(), testWeights, RunMeta{})
+		if r.Operations[0].Latency != nil {
+			t.Errorf("latency should be nil, got %+v", r.Operations[0].Latency)
+		}
+		if _, ok := opJSON(t, r, OpDelete)["latency"]; ok {
+			t.Error("latency key should be omitted entirely, not zeroed")
+		}
+		// The failure itself is still fully reported.
+		if r.Operations[0].Count != 5 || r.Operations[0].Errors != 5 {
+			t.Errorf("count/errors must survive: %+v", r.Operations[0])
+		}
+	})
+
+	t.Run("some attempts succeeded", func(t *testing.T) {
+		s := statsWith([2]float64{10, 3})
+		s.count, s.errors = 5, 2
+		totals := map[string]opStats{OpInsert: *s}
+		r := BuildRunResult(totals, time.Now(), time.Now().Add(time.Second),
+			testCfg(), testWeights, RunMeta{})
+		if r.Operations[0].Latency == nil {
+			t.Fatal("latency should be present when an op succeeded")
+		}
+		if !approxEq(r.Operations[0].Latency.P99MS, 10) {
+			t.Errorf("p99: want 10, got %v", r.Operations[0].Latency.P99MS)
+		}
+	})
+
+	t.Run("one success measured at zero microseconds", func(t *testing.T) {
+		// The trap case. Record truncates sub-microsecond durations to 0 us, so a
+		// real observation yields an all-zero LatencyStats. An implementation that
+		// tested `ls == LatencyStats{}` instead of the sample count would wrongly
+		// drop this op's latency.
+		totals := map[string]opStats{OpReadSimple: {count: 1, latencies: map[int64]int64{0: 1}}}
+		r := BuildRunResult(totals, time.Now(), time.Now().Add(time.Second),
+			testCfg(), testWeights, RunMeta{})
+		if r.Operations[0].Latency == nil {
+			t.Fatal("a genuine 0 us observation must still be reported")
+		}
+		if *r.Operations[0].Latency != (LatencyStats{}) {
+			t.Errorf("want an all-zero block, got %+v", r.Operations[0].Latency)
+		}
+		if _, ok := opJSON(t, r, OpReadSimple)["latency"]; !ok {
+			t.Error("latency key should be present")
+		}
+	})
+}
+
 func TestBuildRunResult_datasetOmittedWhenUnavailable(t *testing.T) {
 	r := BuildRunResult(map[string]opStats{}, time.Now(), time.Now().Add(time.Second),
 		testCfg(), testWeights, RunMeta{})

@@ -20,7 +20,7 @@ var (
 	OpDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Namespace: namespace,
 		Name:      "op_duration_seconds",
-		Help:      "Duration of each DB operation.",
+		Help:      "Duration of each SUCCESSFUL DB operation. Failed ops are excluded — they return in microseconds without touching data and would drag every quantile down as the server degrades. Count them via ops_total{status=\"error\"}; op_duration_seconds_count therefore does not equal sum(ops_total).",
 		Buckets:   []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5, 10, 30},
 	}, []string{"op"})
 
@@ -41,12 +41,20 @@ func Register() {
 	prometheus.MustRegister(OpsTotal, OpDuration, WorkersActive, OpsSkipped)
 }
 
+// RecordOp counts an executed op and, when it succeeded, observes its latency.
+//
+// Errors are counted but deliberately not observed, keeping this histogram the
+// same population as the exact latency map in workload/stats.go. Mixing them
+// would let a flood of microsecond failures pull the Grafana quantiles down
+// exactly when the database is at its worst. During a total outage the latency
+// panels go blank rather than to zero — that is the honest rendering, since no
+// successful op was measured, and the error-rate panels explain the gap.
 func RecordOp(op string, durationSec float64, err error) {
-	status := "ok"
 	if err != nil {
-		status = "error"
+		OpsTotal.WithLabelValues(op, "error").Inc()
+		return
 	}
-	OpsTotal.WithLabelValues(op, status).Inc()
+	OpsTotal.WithLabelValues(op, "ok").Inc()
 	OpDuration.WithLabelValues(op).Observe(durationSec)
 }
 

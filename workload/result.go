@@ -26,6 +26,9 @@ import (
 // LatencyStats summarises one op's latency distribution, in milliseconds. All
 // values derive from the exact observation set, so they are real measured
 // latencies rather than bucket estimates.
+//
+// Successful ops only. Failures return in microseconds without doing the work,
+// so including them would make these numbers improve as the database degrades.
 type LatencyStats struct {
 	MinMS  float64 `json:"min_ms"`
 	MeanMS float64 `json:"mean_ms"`
@@ -37,12 +40,19 @@ type LatencyStats struct {
 }
 
 // OpResult is the whole-run outcome for a single operation.
+//
+// OpsPerSec counts *attempts*, failures included, so a broken database reports
+// a high rate next to a high error count. Latency is present iff count >
+// errors: when every attempt failed there is nothing to summarise, and emitting
+// an all-zero block would read as "instant", which is the same lie this
+// separation exists to remove. An absent latency key therefore means "no
+// successful op was measured", not "this version omits the field".
 type OpResult struct {
-	Op        string       `json:"op"`
-	Count     int64        `json:"count"`
-	Errors    int64        `json:"errors"`
-	OpsPerSec float64      `json:"ops_per_sec"`
-	Latency   LatencyStats `json:"latency"`
+	Op        string        `json:"op"`
+	Count     int64         `json:"count"`
+	Errors    int64         `json:"errors"`
+	OpsPerSec float64       `json:"ops_per_sec"`
+	Latency   *LatencyStats `json:"latency,omitempty"`
 }
 
 // IntervalOp is one operation's activity within a single summary window.
@@ -331,12 +341,21 @@ func BuildRunResult(
 		s := totals[op]
 		t.Ops += s.count
 		t.Errors += s.errors
+		// Presence is decided by the observation count, never by comparing the
+		// result against LatencyStats{}: Record truncates sub-microsecond
+		// durations to 0 µs, so a genuinely measured op can produce an all-zero
+		// struct that must still be reported.
+		var latency *LatencyStats
+		if s.samples() > 0 {
+			ls := s.latencyStats()
+			latency = &ls
+		}
 		operations = append(operations, OpResult{
 			Op:        op,
 			Count:     s.count,
 			Errors:    s.errors,
 			OpsPerSec: rate(s.count),
-			Latency:   s.latencyStats(),
+			Latency:   latency,
 		})
 	}
 	t.OpsPerSec = rate(t.Ops)
